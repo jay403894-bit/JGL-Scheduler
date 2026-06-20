@@ -9,19 +9,18 @@
 static constexpr uint8_t NONE = 255;
 
 namespace T_Threads {
-	struct TaskNode {
-		Task* task;
-		std::vector<TaskNode*> dependents;
-		std::atomic<int> dependencies_left;
-		uint8_t cpu_id = 0;
-		uint8_t priority = 0;
-		bool is_local = true;
-		bool is_fork = false;
-        TaskNode(Task* t) : task(t), dependencies_left(0) {} 
+    struct TaskNode {
+        Task* task;
+        std::vector<TaskNode*> dependents;
+        std::atomic<int> dependencies_left;
+        std::atomic<bool> submitted{ false };
+        uint8_t cpu_id = 0;
+        uint8_t priority = 0;
+        bool is_local = true;
+        bool is_fork = false;
+        TaskNode(Task* t) : task(t), dependencies_left(0) {}
     };
     class TaskDAG {
-    private:
-        std::vector<std::unique_ptr<TaskNode>> node_pool;
     public:
         TaskDAG(TaskScheduler& sched) : scheduler_(sched) {};
         TaskNode* createNode(Task* t, uint8_t priority = NONE, uint8_t cpu_id = NONE);
@@ -34,8 +33,10 @@ namespace T_Threads {
 
     private:
         TaskScheduler& scheduler_;
-        std::mutex graph_mutex_; 
+        std::mutex graph_mutex_;
+        std::mutex pool_mutex_; // Protects node_pool
+        std::vector<std::unique_ptr<TaskNode>> node_pool;
 
         void SubmitToScheduler(TaskNode* node);
     };
-}
+};

@@ -2,6 +2,7 @@
 using namespace T_Threads;
 
 TaskNode* TaskDAG::createNode(Task* t, uint8_t priority, uint8_t cpu_id) {
+	std::lock_guard<std::mutex> lock(pool_mutex_);
     auto node = std::make_unique<TaskNode>(t);
     if (priority != NONE)
     {
@@ -16,6 +17,7 @@ TaskNode* TaskDAG::createNode(Task* t, uint8_t priority, uint8_t cpu_id) {
     return node_pool.back().get();
 }
 void TaskDAG::Clear() {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
     node_pool.clear();
 }
 void TaskDAG::AddDependency(TaskNode* dependent, TaskNode* dependency) {
@@ -43,6 +45,9 @@ void TaskDAG::OnTaskFinished(TaskNode* node) {
 
 void TaskDAG::SubmitToScheduler(TaskNode* node) {
 
+    if (node->submitted.exchange(true, std::memory_order_acq_rel)) {
+        return; // Already submitted by another thread, do nothing!
+    }
     node->task->onComplete = [node, this]() {
         this->OnTaskFinished(node);
         };
