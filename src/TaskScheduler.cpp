@@ -117,7 +117,7 @@ void TaskScheduler::Stop(Task* worker_task) {
     stop_flag_.store(true, std::memory_order_release);
     worker_task->stop();
 }
-void TaskScheduler::waitAll(const std::vector<Task*>& tasks) {
+void TaskScheduler::WaitAll(const std::vector<Task*>& tasks) {
     for (auto* t : tasks) {
         // A slightly better way to wait than just yield()
         while (!t->complete.load(std::memory_order_acquire)) {
