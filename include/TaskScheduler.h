@@ -29,7 +29,7 @@ namespace T_Threads {
 		void Resume();
 		void Stop(Task* worker_task); 
 		void CollectGarbage();
-		void waitAll(const std::vector<Task*>& tasks);
+		void WaitAll(const std::vector<Task*>& tasks);
 
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
 		void SubmitLocal(F&& f) {
