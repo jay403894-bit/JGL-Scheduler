@@ -104,13 +104,15 @@ or
 Submitting Tasks
 ----------------
 
------------
-Local Tasks
------------
+-------------------------
+Work stealing deque tasks
+           &
+Local affinity tasks
+-------------------------
 Assign tasks to a thread-local queue:
 
-	scheduler.SubmitLocal(task);         // Round-robin load balanced
-	scheduler.SubmitLocal(1, task);      // Assign to CPU core 1 specifically
+	scheduler.Push(task);         // Round-robin load balanced
+	scheduler.Push(1, task);      // Assign to CPU core 1 affinity hint, work stealing may take it 
 
 you can also directly type in a lambda instead of a task, but it will not be tracked unless you specifically
 
@@ -122,8 +124,8 @@ Priority Tasks
 
 Submit tasks to a global priority queue (5 levels):
 
-	scheduler.SubmitPQ(task);             // Default priority (3)
-	scheduler.SubmitPQ(0, task);          // Specific priority (0–4)
+	scheduler.PushPQ(task);             // Default priority (3)
+	scheduler.PushPQ(0, task);          // Specific priority (0–4)
 
 ------------
 Forked Tasks
@@ -131,7 +133,7 @@ Forked Tasks
 
 Fork a task outside the pool:
 
-	scheduler.SubmitFork(coreID, task);
+	scheduler.PushFork(coreID, task);
 
 Forked tasks temporarily remove the thread from the pool. Any local work is redistributed before forking. Stop the worker to rejoin the pool.
 
@@ -163,7 +165,7 @@ To track completion safely, keep tasks in a vector and delete them after all tas
 
             Task* task = new Task(simpleTaskFn, id);
 
-            scheduler.SubmitLocal(task);
+            scheduler.Push(task);
             tasks.push_back(task);
             std::this_thread::yield();
         }
@@ -250,16 +252,20 @@ simply
         T_Threads::EpochManager::Instance().Tick();
 at the end of your main loop 
 
+4. If you want to run a service rather than a fork job with PushFork!!!
+ -- you still can run a continuous service (audio, networking, etc) if you want!
+in the tasks void* data, send a pointer to the task itself as a parameter.
 
+then run task->SignalComplete() when the subsystem is active and ready instead of waiting for it to finish!
+
+this will signal to the dag to run any dependent task on that service!
 ---------------------------
 Limitations / Known Issues
 ---------------------------
 
-Lambdas must be be saved for tracking if you need to and are one shot unless declared as new LambdaTask. if you just submit([](){}) without saving the task for tracking
-
 Windows Only: No pthreads/Linux support yet.
 
-Task Limits: ~32 million tasks in global queues, ~32k per work-stealing queue. overflow not really handled
+Task Limits: ~32 million tasks in global queues, ~32k per work-stealing queue. overflow not really handled arena size is about 10mb which is 4x that so can be adjusted.
 
 if you need bigger sizes you have to modify the source or if you had to save memory and needed less and knew in advance
 

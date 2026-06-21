@@ -21,11 +21,11 @@ namespace T_Threads {
 		void NotifyAll();
 		void ParallelForBlocking(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		void ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func);
-		bool SubmitLocal(Task* task);
-		bool SubmitLocal(uint8_t cpu_affinity, Task* task);
-		bool SubmitPQ(Task* task);
-		bool SubmitPQ(uint8_t priority, Task* task);
-		bool SubmitFork(uint8_t cpu_affinity, Task* task);
+		bool Push(Task* task);
+		bool Push(uint8_t cpu_affinity, Task* task);
+		bool PushPQ(Task* task);
+		bool PushPQ(uint8_t priority, Task* task);
+		bool PushFork(uint8_t cpu_affinity, Task* task);
 		void Pause();
 		void Resume();
 		void Stop(Task* worker_task); 
@@ -46,33 +46,33 @@ namespace T_Threads {
 			return task;
 		}
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
-		void SubmitLocal(F&& f) {
+		void Push(F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushLocal(t);
 			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
-		void SubmitLocal(uint8_t cpu_affinity, F&& f) {
+		void Push(uint8_t cpu_affinity, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushLocal(t, cpu_affinity);
 			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
-		void SubmitPQ(F&& f) {
+		void PushPQ(F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
-			Push(t);
+			PushToPQ(t);
 			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
-		void SubmitPQ(uint8_t priority, F&& f) {
+		void PushPQ(uint8_t priority, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
-			Push(t, priority);
+			PushToPQ(t, priority);
 			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
 		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
-		void SubmitFork(size_t coreID, F&& f) {
+		void PushFork(size_t coreID, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
-			PushToCore(coreID, t);
+			Push(coreID, t);
 			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
 		void* AllocateFromArena(size_t size);
@@ -81,8 +81,8 @@ namespace T_Threads {
 
 		void StartPool(size_t poolSize);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
-		bool Push(Task* task, uint8_t priority = 3);
-		bool PushToCore(size_t core_id, Task* task);
+		bool PushToPQ(Task* task, uint8_t priority = 3);
+		bool Push(size_t core_id, Task* task);
 		TaskScheduler(size_t poolSize = std::thread::hardware_concurrency() - 1);
 		int PickNextWorker();
 

@@ -11,19 +11,28 @@ namespace T_Threads {
         std::atomic<bool> stop_flag{ false };
         std::function<void()> onComplete;
         std::atomic<bool> complete{ false };
-
+        std::atomic<bool> callbackFlag{ false };
         Task(Func f, void* d = nullptr)
             : fn(f), data(d) {
         }
 
-        inline void execute() noexcept {
+        inline void Execute() noexcept {
              fn(data);
-            if (onComplete) onComplete();
+             if (onComplete && !callbackFlag.load(std::memory_order_acquire)) {
+                 onComplete();
+             }
             complete.store(true, std::memory_order_release);
         }
 
-
-        inline void stop() {
+        inline void SignalComplete() {
+            // Only fire if we haven't already
+            if (!callbackFlag.exchange(true, std::memory_order_acq_rel)) {
+                if (onComplete) {
+                    onComplete();
+                }
+            }
+        }
+        inline void Stop() {
             stop_flag.store(true, std::memory_order_release);
         }
     };

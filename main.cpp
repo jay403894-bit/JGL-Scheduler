@@ -14,7 +14,7 @@ void forkedTask(void* data) {
 
         ctr = (ctr + 1) % 5;
         int capturedCtr = ctr; // new variable per iteration
-        TaskScheduler::Instance().SubmitPQ(ctr, [ctr]() {
+        TaskScheduler::Instance().PushPQ(ctr, [ctr]() {
             std::cout << "priority: " << ctr << std::endl;
             });
   
@@ -38,9 +38,9 @@ void fork() {
     Task* forkt = new Task(forkedTask, nullptr);
 
 
-    scheduler.SubmitFork(3,forkt);
+    scheduler.PushFork(3,forkt);
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    forkt->stop();
+    forkt->Stop();
     while (!forkt->complete.load()) {
         std::this_thread::yield();
     }
@@ -90,7 +90,7 @@ int main() {
             int* id = new int(t);
 
             Task* task = scheduler.CreateTask(simpleTaskFn, id);
-            scheduler.SubmitLocal(task);
+            scheduler.Push(task);
              tasks.push_back(task);
              std::this_thread::yield();
         }

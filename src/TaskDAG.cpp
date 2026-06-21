@@ -55,18 +55,18 @@ void TaskDAG::SubmitToScheduler(TaskNode* node) {
         };
 
     if (node->isFork) {
-        scheduler.SubmitFork(node->cpuID, node->task);
+        scheduler.PushFork(node->cpuID, node->task);
     }
     else if (node->isLocal) {
         if (node->cpuID == 0)
-            scheduler.SubmitLocal(node->task);
+            scheduler.Push(node->task);
         else
-            scheduler.SubmitLocal(node->cpuID, node->task);
+            scheduler.Push(node->cpuID, node->task);
     }
     else {
         if (node->priority == 0)
-            scheduler.SubmitPQ(node->task);
+            scheduler.PushPQ(node->task);
         else
-            scheduler.SubmitPQ(node->priority, node->task);
+            scheduler.PushPQ(node->priority, node->task);
     }
 }

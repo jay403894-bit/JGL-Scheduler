@@ -29,7 +29,7 @@ namespace T_Threads {
             delete[] buffer_;
         }
 
-        // Owner-only Push
+        // Owner-only PushToPQ
         bool push_bottom(Task* item) {
             if (!item) {
                 std::cerr << "[TaskDeque::push_bottom] ERROR: pushing null item!\n";

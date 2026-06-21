@@ -234,7 +234,7 @@ void T_Thread::Worker() {
 
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
-			task_to_run->execute();
+			task_to_run->Execute();
 			SharedQueues::graveyard.push(task_to_run);
 
 			if (is_handling_fork)

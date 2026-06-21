@@ -23,7 +23,7 @@ void TaskScheduler::ProcessMainThread()
 	Task* t;
 	while (mainQ.pop(t)) {
 		if (!t) continue;
-		t->execute();
+		t->Execute();
 	}
 }
 void TaskScheduler::Join() {
@@ -61,8 +61,8 @@ void T_Threads::TaskScheduler::ParallelForBlocking(int start, int end, int chunk
 		int chunkStart = start + i * chunkSize;
 		int chunkEnd = std::min(chunkStart + chunkSize, end);
 
-		// Push a task to your scheduler that does a slice of the work
-		this->SubmitLocal([=, &counter]() {
+		// PushToPQ a task to your scheduler that does a slice of the work
+		this->Push([=, &counter]() {
 			func(chunkStart, chunkEnd);
 
 			// If this was the last chunk, trigger whatever should happen next
@@ -87,8 +87,8 @@ void T_Threads::TaskScheduler::ParallelFor(int start, int end, int chunkSize, st
 		int chunkStart = start + i * chunkSize;
 		int chunkEnd = std::min(chunkStart + chunkSize, end);
 
-		// Push a task to your scheduler that does a slice of the work
-		this->SubmitLocal([=, &counter]() {
+		// PushToPQ a task to your scheduler that does a slice of the work
+		this->Push([=, &counter]() {
 			func(chunkStart, chunkEnd);
 
 			// If this was the last chunk, trigger whatever should happen next
@@ -143,27 +143,27 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	}
 	poolActive.store(true, std::memory_order_release);
 }
-bool TaskScheduler::SubmitLocal(Task* task)
+bool TaskScheduler::Push(Task* task)
 {
 	return PushLocal(task);
 }
-bool TaskScheduler::SubmitLocal(uint8_t cpu_affinity, Task* task)
+bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task)
 {
 	return PushLocal(task, cpu_affinity);
 }
-bool TaskScheduler::SubmitPQ(Task* task)
+bool TaskScheduler::PushPQ(Task* task)
 {
-	return Push(task);
+	return PushToPQ(task);
 }
-bool TaskScheduler::SubmitPQ(uint8_t priority, Task* task)
+bool TaskScheduler::PushPQ(uint8_t priority, Task* task)
 {
-	return Push(task, priority);
+	return PushToPQ(task, priority);
 }
-bool TaskScheduler::SubmitFork(uint8_t cpu_affinity, Task* task)
+bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task)
 {
 	if (!task)
 		return false;
-	return PushToCore(cpu_affinity, task);
+	return Push(cpu_affinity, task);
 }
 void TaskScheduler::Pause() {
 	SharedQueues::paused.store(true, std::memory_order_release);
@@ -174,7 +174,7 @@ void TaskScheduler::Resume() {
 }
 void TaskScheduler::Stop(Task* worker_task) {
 	stopFlag.store(true, std::memory_order_release);
-	worker_task->stop();
+	worker_task->Stop();
 }
 void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
 	for (auto* t : tasks) {
@@ -230,7 +230,7 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 	return true;
 }
-bool TaskScheduler::Push(Task* task, uint8_t priority)
+bool TaskScheduler::PushToPQ(Task* task, uint8_t priority)
 {
 	//simple guard if less than pin ot priority 0 if greater max at 5
 	if (priority > 4)
@@ -246,7 +246,7 @@ bool TaskScheduler::Push(Task* task, uint8_t priority)
 	NotifyAll();
 	return true;
 }
-bool TaskScheduler::PushToCore(size_t core_id, Task* task)
+bool TaskScheduler::Push(size_t core_id, Task* task)
 {
 	if (core_id < 1) return false;
 	if (!poolActive) return false;
