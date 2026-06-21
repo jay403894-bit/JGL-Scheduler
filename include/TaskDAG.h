@@ -25,7 +25,6 @@ namespace T_Threads {
         void EndFrame();
     private:
         TaskScheduler& scheduler;
-        std::mutex graphMutex;
 
         void SubmitToScheduler(TaskNode* node);
     };
