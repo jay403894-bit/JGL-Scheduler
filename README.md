@@ -16,13 +16,9 @@ Feel free to explore and experiment with the scheduler. Pull requests or ideas w
 
 ## Features
 
-
-
 - **Thread Pool:** Efficient management of worker threads.
 
 - **Local Queues:** Tasks can be scheduled to specific threads for cache locality.
-
-- **Heap/periodic and delayed tasks:** Tasks can be scheduled to run periodically or delayed.
 
 - **Manual task Garbage collection:** deferred deletion, scheduler.CollectGarbage() at the end of a frame or whenever tasks are completed and no longer being used/saved.
 
@@ -36,6 +32,7 @@ Feel free to explore and experiment with the scheduler. Pull requests or ideas w
 
 - **DAG:** Supports task dependency graphing with optional TaskDAG
 
+- **memory management:* Arena allocation and epochs used for garbage collection, simply         T_Threads::EpochManager::Instance().Tick(); at the end of your frame/main loop and include "Epochs.h" in your main loop file.
 
 
 ## Motivation
@@ -76,6 +73,32 @@ The pool runs automatically and can optionally be joined:
 	scheduler.Join();  // Stops all workers and joins threads
 
 the pool will automatically rejoin on program exit -- HOWEVER any forked workers must be manually stopped by holding a reference to the task they run with the stop() function in the task->stop() otherwise it will hang on exit, once stopped they will rejoin the pool
+
+--------------
+Creating Tasks
+--------------
+tasks can be created with lambdas or C-style static void(void*) functions using CreateTask
+
+	// Example function for tasks
+	void simpleTaskFn(void* data) {
+   		 int* id = static_cast<int*>(data);
+    		std::this_thread::yield();
+   		 std::cout << "Task " << *id
+      		  << " executed on thread " << std::this_thread::get_id()
+     		   << std::endl << std::flush;
+   		 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+
+	int id=1
+	
+	Task* task = scheduler.CreateTask(simpleTaskFn, id);
+
+or
+	auto* myTask = CreateTask([]() {
+    		// Your code here
+    		printf("Task executing from Arena!\n");
+	});
+
 
 ----------------
 Submitting Tasks
@@ -156,11 +179,11 @@ To track completion safely, keep tasks in a vector and delete them after all tas
 -----------------
 Memory Management
 -----------------
-delete old tasks/garbage collection
-do this at the end of a frame or whenever a large amount of tasks are presumably 
-as deferred cleanup
+memory is automatically handled with Arenas and Epoch Garbage collection
+simply include "Epochs.h" in your main file and run this at the end of your main loop 
+this should ONLY BE RUN by the main thread
 		
-		scheduler.CollectGarbage();
+        T_Threads::EpochManager::Instance().Tick();
 
 ____________________
 :::TO USE THE DAG:::
@@ -201,12 +224,10 @@ Submit your entry-point node(s). The scheduler handles the propagation through t
 
 3. Cleanup
 
-To maintain performance, the system utilizes a Main-Thread-Only garbage collection strategy.
+simply
+        T_Threads::EpochManager::Instance().Tick();
+at the end of your main loop 
 
-Call this periodically (usually once per frame on the main thread)
-		
-		sched.CollectGarbage(); //normal garbage collection call
-		dag.Clear(); //clear the dag nodes 
 
 ---------------------------
 Limitations / Known Issues

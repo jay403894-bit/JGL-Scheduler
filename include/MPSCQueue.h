@@ -8,7 +8,7 @@ namespace T_Threads {
     class MPSCQueue {
     private:
         struct Node {
-            T data_; 
+            T data_;
             std::atomic<Node*> next_;
             Node(T d = T()) : data_(d), next_(nullptr) {}
         };
@@ -19,34 +19,34 @@ namespace T_Threads {
 
     public:
         MPSCQueue() {
-            head_ = new Node(); 
+            head_ = new Node();
             tail_.store(head_, std::memory_order_relaxed);
             size_ = 0;
         }
 
         ~MPSCQueue() {
             clear();
-            delete head_; 
+            delete head_;
         }
 
         void push(const T& item) {
             size_.fetch_add(1, std::memory_order_relaxed);
-            Node* node = new Node(item); 
+            Node* node = new Node(item);
 
-            
+
             Node* prev = tail_.exchange(node, std::memory_order_acq_rel);
             prev->next_.store(node, std::memory_order_release);
         }
- 
+
         bool pop(T& out_result) {
             Node* head = head_;
             Node* next = head->next_.load(std::memory_order_acquire);
 
-            if (!next) return false; 
+            if (!next) return false;
 
-            out_result = next->data_; 
-            head_ = next;            
-            delete head;              
+            out_result = next->data_;
+            head_ = next;
+            delete head;
 
             size_.fetch_sub(1, std::memory_order_relaxed);
             return true;
@@ -57,7 +57,7 @@ namespace T_Threads {
 
         void clear() {
             T dummy;
-            while (pop(dummy)) {} 
+            while (pop(dummy)) {}
         }
     };
 };

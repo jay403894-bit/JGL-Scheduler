@@ -1,30 +1,32 @@
 #include "../include/TaskDAG.h"
 using namespace T_Threads;
 
-TaskNode* TaskDAG::createNode(Task* t, uint8_t priority, uint8_t cpu_id) {
-	std::lock_guard<std::mutex> lock(pool_mutex_);
-    auto node = std::make_unique<TaskNode>(t);
-    if (priority != NONE)
-    {
-        node->is_local = false;
-        node->priority = priority;
-    }
-    if (cpu_id != NONE)
-    {
-        node->cpu_id = cpu_id;
-    }
-    node_pool.push_back(std::move(node));
-    return node_pool.back().get();
-}
-void TaskDAG::Clear() {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-    node_pool.clear();
-}
-void TaskDAG::AddDependency(TaskNode* dependent, TaskNode* dependency) {
-    std::lock_guard<std::mutex> lock(graph_mutex_);
+TaskNode* TaskDAG::CreateNode(Task* t, uint8_t priority, uint8_t cpu_id) {
+    // Allocate the node memory from the scheduler's arena
+    void* mem = scheduler.AllocateFromArena(sizeof(TaskNode));
+    if (!mem) return nullptr;
 
+    // Use placement new
+    TaskNode* node = new (mem) TaskNode(t,scheduler.GetArena());
+
+    // Set properties
+    node->isLocal = (priority == NONE);
+    node->priority = (priority == NONE) ? 0 : priority;
+    node->cpuID = cpu_id;
+
+    // Optional: Keep a reference if you really need to, 
+    // but you don't need unique_ptr anymore!
+    return node;
+}
+
+void TaskDAG::AddDependency(TaskNode* dependent, TaskNode* dependency) {
+    // Increment the dependency count
     dependent->dependencies_left.fetch_add(1, std::memory_order_relaxed);
-    dependency->dependents.push_back(dependent);
+
+    // Add the dependent node to the dependency's list
+    // We use the pointer address as the key
+    uint64_t key = reinterpret_cast<uintptr_t>(dependent);
+    dependency->dependents->add(key, dependent);
 }
 
 void TaskDAG::SubmitIfReady(TaskNode* node) {
@@ -33,15 +35,15 @@ void TaskDAG::SubmitIfReady(TaskNode* node) {
     }
 }
 void TaskDAG::OnTaskFinished(TaskNode* node) {
-
-    for (TaskNode* dep : node->dependents) {
-        int val = dep->dependencies_left.fetch_sub(1, std::memory_order_acq_rel) - 1; // -1 to get the result AFTER sub
-
+    // Traverse the lock-free list and trigger dependents
+    node->dependents->for_each([this](TaskNode* dep) {
+        int val = dep->dependencies_left.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (val == 0) {
             SubmitToScheduler(dep);
         }
-    }
+        });
 }
+
 
 void TaskDAG::SubmitToScheduler(TaskNode* node) {
 
@@ -52,19 +54,19 @@ void TaskDAG::SubmitToScheduler(TaskNode* node) {
         this->OnTaskFinished(node);
         };
 
-    if (node->is_fork) {
-        scheduler_.SubmitFork(node->cpu_id, node->task);
+    if (node->isFork) {
+        scheduler.SubmitFork(node->cpuID, node->task);
     }
-    else if (node->is_local) {
-        if (node->cpu_id == 0)
-            scheduler_.SubmitLocal(node->task);
+    else if (node->isLocal) {
+        if (node->cpuID == 0)
+            scheduler.SubmitLocal(node->task);
         else
-            scheduler_.SubmitLocal(node->cpu_id, node->task);
+            scheduler.SubmitLocal(node->cpuID, node->task);
     }
     else {
         if (node->priority == 0)
-            scheduler_.SubmitPQ(node->task);
+            scheduler.SubmitPQ(node->task);
         else
-            scheduler_.SubmitPQ(node->priority, node->task);
+            scheduler.SubmitPQ(node->priority, node->task);
     }
 }

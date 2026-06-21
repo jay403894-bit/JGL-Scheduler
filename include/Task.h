@@ -30,19 +30,20 @@ namespace T_Threads {
 
     template<typename F>
     class LambdaTask : public Task {
+        F func; // The lambda capture is now INLINE in the memory block!
     public:
         LambdaTask(F&& f)
-            : Task(nullptr, nullptr)  
+            : Task(LambdaTask::ExecuteWrapper, nullptr), // Pass a wrapper to the base
+            func(std::forward<F>(f))
         {
-            struct Wrapper { F f; };
-            Wrapper* w = new Wrapper{ std::forward<F>(f) };
-
-            this->fn = [](void* ptr) {
-                Wrapper* w = static_cast<Wrapper*>(ptr);
-                w->f();
-                delete w;
-                };
-            this->data = w;
+            // Link the 'data' pointer to 'this' so the wrapper can find the lambda
+            this->data = this;
+        }
+    private:
+        // 2. Static wrapper that calls the lambda stored in the instance
+        static void ExecuteWrapper(void* ptr) {
+            LambdaTask* self = static_cast<LambdaTask*>(ptr);
+            self->func();
         }
     };
  

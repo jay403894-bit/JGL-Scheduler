@@ -7,9 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Define your library
 add_library(T_Threads 
+    src/Epochs.cpp
     src/T_Thread.cpp
-    src/TaskScheduler.cpp 
     src/TaskDAG.cpp
+    src/TaskScheduler.cpp 
 )
 
 # Tell users where the header files are

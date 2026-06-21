@@ -92,7 +92,6 @@ namespace T_Threads {
             }
         }
         
-        // Thief-only
         std::optional<Task*> steal() {
             size_t t = top_.load(std::memory_order_acquire);
             std::atomic_thread_fence(std::memory_order_seq_cst);

@@ -52,10 +52,10 @@ void RunDAGTest() {
     std::atomic<int> counter{ 0 };
 
     // 1. Create Nodes using the DAG factory
-    TaskNode* nodeA = dag.createNode(new LambdaTask([&]() { std::cout << "Task A finished\n"; counter++; }));
-    TaskNode* nodeB = dag.createNode(new LambdaTask([&]() { std::cout << "Task B finished\n"; counter++; }));
-    TaskNode* nodeC = dag.createNode(new LambdaTask([&]() { std::cout << "Task C finished\n"; counter++; }));
-    TaskNode* nodeD = dag.createNode(new LambdaTask([&]() { std::cout << "Task D finished (Target reached!)\n"; counter++; }));
+    TaskNode* nodeA = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task A finished\n"; counter++; }));
+    TaskNode* nodeB = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task B finished\n"; counter++; }));
+    TaskNode* nodeC = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task C finished\n"; counter++; }));
+    TaskNode* nodeD = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task D finished (Target reached!)\n"; counter++; }));
    
     // 2. Setup Dependencies
     dag.AddDependency(nodeB, nodeA);
@@ -73,8 +73,7 @@ void RunDAGTest() {
     }
 
     // IMPORTANT: Collect garbage so the LambdaTasks created by the nodes are deleted!
-    sched.CollectGarbage();
-    dag.Clear();
+    //dag.Clear();
     std::cout << "All tasks complete.\n";
 }
 int main() {
@@ -90,8 +89,7 @@ int main() {
             // allocate id on heap to keep it alive for the function
             int* id = new int(t);
 
-            Task* task = new Task(simpleTaskFn, id);
-
+            Task* task = scheduler.CreateTask(simpleTaskFn, id);
             scheduler.SubmitLocal(task);
              tasks.push_back(task);
              std::this_thread::yield();
@@ -102,12 +100,7 @@ int main() {
     fork();
 
 
-    for (auto t : tasks) {
-        while (!t->complete.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
-    }
+    scheduler.Wait(tasks);
     RunDAGTest();
-    scheduler.CollectGarbage();
     return 0;
 }

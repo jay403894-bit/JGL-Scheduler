@@ -6,6 +6,7 @@
 #include <queue>
 #include "Task.h"
 #include "SharedQueues.h"
+#include "Epochs.h"
 
 namespace T_Threads {
     inline thread_local Task* current_task = nullptr;
@@ -25,31 +26,27 @@ namespace T_Threads {
         void NotifyWorker();
         bool AllQueuesEmpty();
         bool Ready();
+        void OnFinishedArena(ArenaPool* arena);
     private:
         void Worker();
 
-        std::atomic<int> queue_load_{ 0 };
-        std::atomic<bool> immediate_{ false };
-        std::atomic<bool> running_{ false };
-        std::atomic<bool> ready_{ false };
-        std::atomic<bool> joining_{ false };
-        int queue_index_ = 0;
-        std::mutex worker_mutex_;
-        std::mutex join_mutex_;
-        std::condition_variable cv_worker_done_;
-        std::condition_variable cv_;
-        std::condition_variable cv_affinity_;
-        Task* task_ = nullptr;
-        Task* immediate_task_ = nullptr;
-        std::thread thread_;
-        std::thread::native_handle_type native_handle_;
-        std::vector<Task*> local_queue_;
-        std::vector<Task*> overflow_;
-#ifdef _WIN32
-        uintptr_t mask_; 
-#else
-        // Implement POSIX sched_setaffinity if cross-platform later
-#endif
+        std::atomic<int> qLoad{ 0 };
+        std::atomic<bool> immediate{ false };
+        std::atomic<bool> running{ false };
+        std::atomic<bool> ready{ false };
+        std::atomic<bool> joining{ false };
+        int qIndex = 0;
+        std::mutex workerMutex;
+        std::mutex joinMutex;
+        std::condition_variable cvWorkerDone;
+        std::condition_variable cv;
+        std::condition_variable cvAffinity;
+        Task* task = nullptr;
+        Task* immediateTask = nullptr;
+        std::thread thread;
+        std::thread::native_handle_type nativeHandle;
+        std::vector<Task*> localQ;
+        std::vector<Task*> overflow;
 
     };
 };
