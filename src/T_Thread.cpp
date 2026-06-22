@@ -131,36 +131,31 @@ void T_Thread::Worker() {
 			}
 		}
 
-		int inbox_drain_count = 0;
-		while (inbox->pop(t)) {
-			if (++inbox_drain_count > 100000) {
-				std::cerr << "[worker " << qIndex << "] ERROR: inbox drain looping >100k times! Aborting.\n";
-				break;  
+		int retries = 0;
+		const int MAX_RETRIES = 100;
+
+		while (true) {
+			if (inbox->pop(t)) {
+				retries = 0;
+
+				if (!t) {
+					std::cerr << "[worker " << qIndex << "] ERROR: popped null task\n";
+					continue;
+				}
+
+				qLoad.fetch_add(1, std::memory_order_relaxed);
+
+				while (!local_deque->push_bottom(t)) {
+					std::this_thread::yield();
+				}
 			}
-
-			if (!t) {
-				std::cerr << "[worker " << qIndex << "] ERROR: popped null from inboxes_\n";
-				continue;
-			}
-			qLoad.fetch_add(1, std::memory_order_relaxed);
-
-			if (inbox_drain_count % 100 == 0) {
-				std::cerr << "[worker " << qIndex << "] inbox drain #" << inbox_drain_count << " task " << (void*)t << "\n";
-			}
-
-			if (local_deque->push_bottom(t)) {
-				continue; 
-			}
-
-			std::cerr << "[worker " << qIndex << "] FAILED push_bottom for task " << (void*)t << "\n";
-
-			if (!SharedQueues::proirityQ[0].try_enqueue(t)) {
-				std::cerr << "[worker " << qIndex << "] WARNING: task " << (void*)t << " overflow, stashing locally\n";
-				overflow.push_back(t);
+			else {
+				if (inbox->empty() && ++retries > MAX_RETRIES) {
+					break; // confirmed empty after sustained polling
+				}
+				std::this_thread::yield();
 			}
 		}
-		
-		
 		// --- 1. Immediate task execution ---
 		bool is_handling_fork = false; 
 		{

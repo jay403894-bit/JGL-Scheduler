@@ -3,11 +3,11 @@
   TaskDAG.cpp
   TaskScheduler.cpp
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(117,27): warning C4267: 'initializing': conversion from 'size_t' to 'unsigned int', possible loss of data
-C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(272,27): warning C4267: 'argument': conversion from 'size_t' to 'const _Ty', possible loss of data
-C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(272,27): warning C4267:         with
-C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(272,27): warning C4267:         [
-C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(272,27): warning C4267:             _Ty=int
-C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(272,27): warning C4267:         ]
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(269,27): warning C4267: 'argument': conversion from 'size_t' to 'const _Ty', possible loss of data
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(269,27): warning C4267:         with
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(269,27): warning C4267:         [
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(269,27): warning C4267:             _Ty=int
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp(269,27): warning C4267:         ]
   T_Thread.cpp
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\T_Thread.cpp(39,11): warning C4267: '=': conversion from 'size_t' to 'int', possible loss of data
   T_Threads.vcxproj -> C:\Users\jay40\source\repos\T_Threads\T_Threads\x64\Release\T_Threads.lib

@@ -45,7 +45,7 @@ namespace T_Threads {
             bottom_.store(b + 1, std::memory_order_release);
             return true;
         }
-        
+
         // Owner-only pop
         std::optional<Task*> pop_bottom() {
             size_t b = bottom_.load(std::memory_order_relaxed);
@@ -91,7 +91,7 @@ namespace T_Threads {
                 return std::nullopt;
             }
         }
-        
+
         std::optional<Task*> steal() {
             size_t t = top_.load(std::memory_order_acquire);
             std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -133,4 +133,141 @@ namespace T_Threads {
         alignas(64) std::atomic<size_t> bottom_;
     };
 
-} 
+}
+/*
+#pragma once
+#include <atomic>
+#include <cstddef>
+#include <optional>
+#include <iostream>
+
+#include "Task.h"
+
+namespace T_Threads {
+    class TaskDeque {
+    public:
+        explicit TaskDeque(size_t capacity = 32768)
+            : capacity_(capacity),
+            mask_(capacity - 1),
+            buffer_(new Task* [capacity])
+        {
+            if ((capacity & (capacity - 1)) != 0)
+                throw std::runtime_error("Capacity must be a power of 2");
+
+            for (size_t i = 0; i < capacity; i++)
+                buffer_[i] = nullptr;
+
+            top_.store(0, std::memory_order_relaxed);
+            bottom_.store(0, std::memory_order_relaxed);
+        }
+
+        ~TaskDeque() {
+            delete[] buffer_;
+        }
+
+        // Owner-only PushToPQ
+        bool push_bottom(Task* item) {
+            size_t b = bottom_.load(std::memory_order_relaxed);
+            size_t t = top_.load(std::memory_order_acquire);
+
+            if (b - t >= capacity_) return false;
+
+            buffer_[b & mask_] = item;
+
+            // Crucial: use memory_order_release on the store to ensure buffer write 
+            // happens before bottom_ increment
+            bottom_.store(b + 1, std::memory_order_release);
+            return true;
+        }
+
+        std::optional<Task*> pop_bottom() {
+            size_t b = bottom_.load(std::memory_order_relaxed);
+            if (b == 0) return std::nullopt;
+
+            b -= 1;
+            bottom_.store(b, std::memory_order_relaxed);
+
+            // Force synchronize
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            size_t t = top_.load(std::memory_order_acquire);
+
+            if (t <= b) {
+                Task* item = buffer_[b & mask_];
+                if (!item) {
+                    std::cerr << "[TaskDeque::pop_bottom] WARNING: read nullptr from buffer at index " << (b & mask_) << " (b=" << b << " t=" << t << ")\n";
+                }
+                // If it's still null here, the push_bottom hasn't finished the write
+                if (!item) {
+                    bottom_.store(b + 1, std::memory_order_relaxed);
+                    return std::nullopt;
+                }
+
+                if (t != b) {
+                    // More than one item, no race with stealers
+                    return item;
+                }
+
+                // Last item race
+                if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                    // Stealer won
+                    item = nullptr;
+                }
+                bottom_.store(b + 1, std::memory_order_relaxed);
+                return item;
+            }
+            else {
+                // Queue empty
+                bottom_.store(b + 1, std::memory_order_relaxed);
+                return std::nullopt;
+            }
+        }
+
+        std::optional<Task*> steal() {
+            size_t t = top_.load(std::memory_order_acquire);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            size_t b = bottom_.load(std::memory_order_acquire);
+
+            if (t < b) {
+                Task* item = buffer_[t & mask_];
+
+                // Ensure we actually got a valid pointer
+                if (!item) return std::nullopt;
+
+                if (top_.compare_exchange_strong(
+                    t, t + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed))
+                {
+                    return item;
+                }
+            }
+            return std::nullopt;
+        }
+
+        size_t size() const {
+            size_t t = top_.load(std::memory_order_acquire);
+            size_t b = bottom_.load(std::memory_order_acquire);
+            return (b > t) ? (b - t) : 0;
+        }
+
+        size_t capacity() const {
+            return capacity_;
+        }
+        bool empty() const {
+            size_t t = top_.load(std::memory_order_acquire);
+            size_t b = bottom_.load(std::memory_order_acquire);
+            return t >= b;
+        }
+    private:
+        Task** buffer_;
+        const size_t capacity_;
+        const size_t mask_;
+        std::atomic<int> successfulPops{ 0 };
+        std::atomic<int> failedPops{ 0 };
+        alignas(64) std::atomic<size_t> top_;
+        alignas(64) std::atomic<size_t> bottom_;
+    };
+
+}
+*/

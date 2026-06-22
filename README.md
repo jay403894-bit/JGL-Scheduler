@@ -200,6 +200,8 @@ amongst the threads.
 // 2. The scheduler handles the "How" (Partitioning the range 0-1000)
 scheduler.ParallelFor(0, 1000, 128, myPhysicsWork);
 
+there is also a nonblocking variant  ParallelForNB -- this one will not block main if you want to fire and forget
+
 -----------------
 Memory Management
 -----------------

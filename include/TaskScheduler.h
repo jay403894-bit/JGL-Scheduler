@@ -19,8 +19,8 @@ namespace T_Threads {
 		void ProcessMainThread();
 		void Join();
 		void NotifyAll();
-		void ParallelForBlocking(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		void ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func);
+		void ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		bool Push(Task* task);
 		bool Push(uint8_t cpu_affinity, Task* task);
 		bool PushPQ(Task* task);
@@ -45,35 +45,30 @@ namespace T_Threads {
 			LambdaTask<F>* task = new (mem) LambdaTask<F>(std::forward<F>(f));
 			return task;
 		}
-		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void Push(F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushLocal(t);
-			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
-		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void Push(uint8_t cpu_affinity, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushLocal(t, cpu_affinity);
-			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
-		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void PushPQ(F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushToPQ(t);
-			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
-		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void PushPQ(uint8_t priority, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushToPQ(t, priority);
-			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		}
-		template <class F, std::enable_if_t<!std::is_same_v<std::decay_t<F>, Task*>, int> = 0>
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void PushFork(size_t coreID, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
-			Push(coreID, t);
-			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
+			PushToCore(coreID, t);
 		}
 		void* AllocateFromArena(size_t size);
 
@@ -82,7 +77,7 @@ namespace T_Threads {
 		void StartPool(size_t poolSize);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToPQ(Task* task, uint8_t priority = 3);
-		bool Push(size_t core_id, Task* task);
+		bool PushToCore(size_t core_id, Task* task);
 		TaskScheduler(size_t poolSize = std::thread::hardware_concurrency() - 1);
 		int PickNextWorker();
 
@@ -92,6 +87,7 @@ namespace T_Threads {
 		std::atomic<int> nextIndex{ -1 };
 		std::vector<std::shared_ptr<T_Thread>> workers;
 		MPSCQueue<Task*> mainQ;
+		std::mutex testMutex;
 
 		std::condition_variable cv;
 		std::mutex poolMutex;

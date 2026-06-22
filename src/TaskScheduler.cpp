@@ -49,53 +49,53 @@ void T_Threads::TaskScheduler::NotifyAll()
 	for (int i = 0; i < workers.size(); i++)
 		workers[i]->NotifyWorker();
 }
-void T_Threads::TaskScheduler::ParallelForBlocking(int start, int end, int chunkSize, std::function<void(int, int)> func)
-{
-	int totalItems = end - start;
-	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
-
-	// Create a "Counter" that tracks when all chunks are done
-	std::atomic<int> counter{ numTasks };
-
-	for (int i = 0; i < numTasks; ++i) {
-		int chunkStart = start + i * chunkSize;
-		int chunkEnd = std::min(chunkStart + chunkSize, end);
-
-		// PushToPQ a task to your scheduler that does a slice of the work
-		this->Push([=, &counter]() {
-			func(chunkStart, chunkEnd);
-
-			// If this was the last chunk, trigger whatever should happen next
-			if (--counter == 0) {
-				// All chunks finished!
-			}
-			});
-	}
-	while (counter.load(std::memory_order_acquire) > 0) {
-		std::this_thread::yield();
-	}
-}
 void T_Threads::TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func)
 {
+	
+	chunkSize = std::max(1, chunkSize);
 	int totalItems = end - start;
+	if (totalItems <= 0) return;
+
 	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
-	// Create a "Counter" that tracks when all chunks are done
-	std::atomic<int> counter{ numTasks };
+	std::vector<T_Threads::Task*> activeTasks;
+	for (int i = 0; i < numTasks; ++i) {
+		int chunkStart = start + i * chunkSize;
+		int chunkEnd = std::min(chunkStart + chunkSize, end);
+
+		auto t = CreateTask([=]() {
+			func(chunkStart, chunkEnd);
+			});
+		Push(t);
+		activeTasks.push_back(t);
+
+	}
+	NotifyAll();
+	
+	for (auto* t : activeTasks) {
+		if (t == nullptr) continue;
+		while (!t->complete.load(std::memory_order_acquire)) {
+			std::this_thread::yield();
+		}
+	}
+}
+	
+
+void T_Threads::TaskScheduler::ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func)
+{
+	chunkSize = std::max(1, chunkSize);
+	int totalItems = end - start;
+	if (totalItems <= 0) return;
+
+	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
 	for (int i = 0; i < numTasks; ++i) {
 		int chunkStart = start + i * chunkSize;
 		int chunkEnd = std::min(chunkStart + chunkSize, end);
 
-		// PushToPQ a task to your scheduler that does a slice of the work
-		this->Push([=, &counter]() {
+		this->Push([=]() {
 			func(chunkStart, chunkEnd);
-
-			// If this was the last chunk, trigger whatever should happen next
-			if (--counter == 0) {
-				// All chunks finished!
-			}
-		});
+			});
 	}
 }
 void TaskScheduler::StartPool(size_t poolSize) {
@@ -211,11 +211,11 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 
 	size_t num_workers = workers.size();
 
-	// Bound check against the actual pool Worker size instead of raw hardware concurrency
 	if (cpuaffinity > 0 && (size_t)(cpuaffinity - 1) < num_workers) {
 		size_t idx = (size_t)(cpuaffinity - 1);
 
 		if (!SharedQueues::immediateCoresInUse[idx]->load(std::memory_order_acquire)) {
+			SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 			SharedQueues::inboxes[idx]->push(task);
 			NotifyAll();
 		}
@@ -223,39 +223,36 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 			return false;
 	}
 	else {
+		SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 		uint8_t chosen = PickNextWorker();
 		SharedQueues::inboxes[chosen]->push(task);
 		NotifyAll();
 	}
-	SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 	return true;
 }
 bool TaskScheduler::PushToPQ(Task* task, uint8_t priority)
 {
-	//simple guard if less than pin ot priority 0 if greater max at 5
 	if (priority > 4)
 		priority = 4;
 
 	if (!task)
 		return false;
-	if (!SharedQueues::proirityQ[priority].try_enqueue(task)) {
-		//currently no overflow handling if you go over about 32 mil tasks backed up 
-		//but 32 mil tasks is a lot 
-	};
+
 	SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
+	if (!SharedQueues::proirityQ[priority].try_enqueue(task)) {
+		SharedQueues::runningTasks.fetch_sub(1, std::memory_order_relaxed);
+	}
 	NotifyAll();
 	return true;
 }
-bool TaskScheduler::Push(size_t core_id, Task* task)
+bool TaskScheduler::PushToCore(size_t core_id, Task* task)
 {
 	if (core_id < 1) return false;
 	if (!poolActive) return false;
-	if (!task)
-		return false;
+	if (!task) return false;
+	if (SharedQueues::immediateCoresInUse[core_id % workers.size()]->load(std::memory_order_acquire) || core_id < 1) return false;
+	
 
-	if (SharedQueues::immediateCoresInUse[core_id % workers.size()]->load(std::memory_order_acquire) || core_id < 1) {
-		return false;
-	}
 	SharedQueues::runningTasks.fetch_add(1, std::memory_order_relaxed);
 	size_t idx = (core_id - 1) % workers.size();
 	SharedQueues::immediateCoresInUse[idx]->store(true, std::memory_order_release);

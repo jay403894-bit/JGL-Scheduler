@@ -39,19 +39,23 @@ namespace T_Threads {
 
     template<typename F>
     class LambdaTask : public Task {
-        F func; // The lambda capture is now INLINE in the memory block!
+        F func;
     public:
+        // Ensure we use perfect forwarding for the lambda
         LambdaTask(F&& f)
-            : Task(LambdaTask::ExecuteWrapper, nullptr), // Pass a wrapper to the base
+            : Task(LambdaTask::ExecuteWrapper, nullptr),
             func(std::forward<F>(f))
         {
-            // Link the 'data' pointer to 'this' so the wrapper can find the lambda
             this->data = this;
         }
+
     private:
-        // 2. Static wrapper that calls the lambda stored in the instance
         static void ExecuteWrapper(void* ptr) {
+            // Cast the void* back to the correct LambdaTask type
             LambdaTask* self = static_cast<LambdaTask*>(ptr);
+
+            // Invoke the stored lambda directly.
+            // We use () because a lambda IS a functor.
             self->func();
         }
     };
