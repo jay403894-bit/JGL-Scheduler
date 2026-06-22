@@ -28,7 +28,8 @@ namespace T_Threads {
 		bool PushFork(uint8_t cpu_affinity, Task* task);
 		void Pause();
 		void Resume();
-		void Stop(Task* worker_task); 
+		void Stop(Task* worker_task);
+
 		void Wait(const std::vector<Task*>& tasks);
 		Arena* GetArena();
 		void WaitAll();
@@ -73,7 +74,7 @@ namespace T_Threads {
 		void* AllocateFromArena(size_t size);
 
 	private:
-
+		Task* GetTask();
 		void StartPool(size_t poolSize);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToPQ(Task* task, uint8_t priority = 3);

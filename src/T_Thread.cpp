@@ -230,7 +230,6 @@ void T_Thread::Worker() {
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
 			task_to_run->Execute();
-			SharedQueues::graveyard.push(task_to_run);
 
 			if (is_handling_fork)
 			{
@@ -239,9 +238,9 @@ void T_Thread::Worker() {
 				}
 				is_handling_fork = false;
 			}
-			task = nullptr;
-			current_task = nullptr;
-			task_to_run = nullptr;
+			//task = nullptr;
+			//current_task = nullptr;
+			//task_to_run = nullptr;
 			if (SharedQueues::runningTasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
 				// We are the LAST thread to finish! 
 				// It is safe for us to retire the arena.

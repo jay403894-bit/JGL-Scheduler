@@ -75,7 +75,13 @@ void T_Threads::TaskScheduler::ParallelFor(int start, int end, int chunkSize, st
 	for (auto* t : activeTasks) {
 		if (t == nullptr) continue;
 		while (!t->complete.load(std::memory_order_acquire)) {
-			std::this_thread::yield();
+			Task* task = GetTask(); // Try to help with other tasks while waiting
+			if (task) {
+				task->Execute();
+				task->complete.store(true, std::memory_order_release);
+			}
+			else
+				std::this_thread::yield();
 		}
 	}
 }
@@ -176,12 +182,43 @@ void TaskScheduler::Stop(Task* worker_task) {
 	stopFlag.store(true, std::memory_order_release);
 	worker_task->Stop();
 }
+Task* TaskScheduler::GetTask() {
+	bool success = false;
+	Task* task;
+	Task* task_to_run = nullptr;
+
+	for (int i = 0; i < 5; i++) {
+		success = SharedQueues::proirityQ[i].try_dequeue(task);
+		if (success) {
+			task_to_run = task;
+			break;
+		}
+	}
+	if (!task_to_run) {
+		for (size_t i = 0; i < SharedQueues::threadQs.size(); ++i) {
+			auto opt = SharedQueues::threadQs[i]->steal();
+			if (opt) {
+				task_to_run = *opt;
+				current_task = task_to_run;
+				break;
+			}
+		
+		}
+	}
+	return task_to_run;
+}
 void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
 	for (auto* t : tasks) {
 		// A slightly better way to wait than just yield()
 		while (!t->complete.load(std::memory_order_acquire)) {
 			// This is "exponential backoff" - it reduces CPU usage while waiting
-			std::this_thread::yield();
+			Task* task = GetTask(); // Try to help with other tasks while waiting
+			if (task) {
+				task->Execute();
+				task->complete.store(true, std::memory_order_release);
+			}
+			else
+				std::this_thread::yield();
 		}
 	}
 }
@@ -191,7 +228,13 @@ Arena* T_Threads::TaskScheduler::GetArena()
 }
 void TaskScheduler::WaitAll() {
 	while (SharedQueues::runningTasks.load(std::memory_order_acquire) > 0) {
-		std::this_thread::yield();
+		Task* task = GetTask(); // Try to help with other tasks while waiting
+		if (task) {
+			task->Execute();
+			task->complete.store(true, std::memory_order_release);
+		}
+		else
+			std::this_thread::yield();
 	}
 }
 
