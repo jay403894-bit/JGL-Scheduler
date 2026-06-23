@@ -48,7 +48,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -156,7 +156,6 @@
     <ClInclude Include="include\LockFreeList.h" />
     <ClInclude Include="include\MPSCQueue.h" />
     <ClInclude Include="include\platform.h" />
-    <ClInclude Include="include\SharedQueues.h" />
     <ClInclude Include="include\Stack.h" />
     <ClInclude Include="include\Task.h" />
     <ClInclude Include="include\TaskDAG.h" />

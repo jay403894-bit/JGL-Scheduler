@@ -3,6 +3,7 @@
 #include <functional>
 #include <algorithm> // Required for std::min
 #include <utility>
+#include "include/T_Thread.h"
 #include "include/TaskScheduler.h"  
 #include "include/TaskDAG.h"
 using T_Threads::Task;

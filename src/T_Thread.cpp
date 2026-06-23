@@ -1,10 +1,11 @@
 #include "../include/T_Thread.h"
 #include "../include/platform.h"
+#include "../include/TaskScheduler.h"
 #include <iostream>
 using namespace T_Threads;
 thread_local T_Thread* T_Thread::self = nullptr;
 
-T_Thread::T_Thread() {
+T_Thread::T_Thread(TaskScheduler& scheduler) : scheduler(&scheduler) {
 	std::memset(&schedulerCtx, 0, sizeof(Context));
 }
 T_Thread::~T_Thread() {
@@ -67,24 +68,16 @@ bool T_Thread::AllQueuesEmpty() {
 		return false;
 	if (!overflow.empty())
 		return false;
-	if (!SharedQueues::inboxes[qIndex]->empty())
+	if (!scheduler->inboxes[qIndex]->empty())
 		return false;
-	for (const auto& q : SharedQueues::threadQs) {
-		if (!q->empty()) {
+	for (const auto& q : scheduler->threadQs) {
+		if (!q->empty())
 			return false;
-		}
 	}
-	if (SharedQueues::proirityQ[0].size_approx() > 0)
-		return false;
-	if (SharedQueues::proirityQ[1].size_approx() > 0)
-		return false;
-	if (SharedQueues::proirityQ[2].size_approx() > 0)
-		return false;
-	if (SharedQueues::proirityQ[3].size_approx() > 0)
-		return false;
-	if (SharedQueues::proirityQ[4].size_approx() > 0)
-		return false;
-
+	for (int i = 0; i < 5; ++i) {
+		if (scheduler->priorityQ[i].size_approx() > 0)
+			return false;
+	}
 	return true;
 }
 bool T_Thread::Ready()
@@ -92,18 +85,11 @@ bool T_Thread::Ready()
 	return ready.load(std::memory_order_acquire);
 }
 void T_Thread::OnFinishedArena(ArenaPool* arena) {
-
 	size_t epoch = EpochManager::Instance().CurrentEpoch();
-	Arena* arenaToRetire = SharedQueues::taskArena.GetActive();
-
+	Arena* arenaToRetire = scheduler->taskArena.GetActive();
 	EpochManager::Instance().RetireArena(arenaToRetire, epoch);
-
-	// 3. Rotate the pool to the next arena
-	SharedQueues::taskArena.Rotate();
-
-	// 4. Tick to trigger the background reclamation
+	scheduler->taskArena.Rotate();
 	EpochManager::Instance().Tick();
-
 }
 void T_Thread::Worker() {
 	running.store(true, std::memory_order_release);
@@ -115,18 +101,18 @@ void T_Thread::Worker() {
 			cv.wait_for(lock, std::chrono::microseconds(5), [this]() {
 				return !running.load(std::memory_order_acquire)
 					|| immediate.load(std::memory_order_acquire)
-					|| (!SharedQueues::paused.load(std::memory_order_acquire) && !AllQueuesEmpty());
+					|| (!scheduler->paused.load(std::memory_order_acquire) && !AllQueuesEmpty());
 				});
 
 			if (!running.load(std::memory_order_acquire)) break;
 		}
-		auto& inbox = SharedQueues::inboxes[qIndex];
-		auto& local_deque = SharedQueues::threadQs[qIndex];
+		auto& inbox = scheduler->inboxes[qIndex];
+		auto& local_deque = scheduler->threadQs[qIndex];
 		Task* t = nullptr;
 		if (!overflow.empty()) {
 			while (local_deque->size() < local_deque->capacity() && !overflow.empty()) {
 				if (!local_deque->push_bottom(overflow.back())) {
-					break;  
+					break;
 				}
 				overflow.pop_back();
 			}
@@ -152,40 +138,40 @@ void T_Thread::Worker() {
 			}
 			else {
 				if (inbox->empty() && ++retries > MAX_RETRIES) {
-					break; // confirmed empty after sustained polling
+					break;
 				}
 				std::this_thread::yield();
 			}
 		}
+
 		// --- 1. Immediate task execution ---
-		bool is_handling_fork = false; 
+		bool is_handling_fork = false;
 		{
 			if (immediateTask != nullptr) {
 				if (!localQ.empty()) {
 					while (!localQ.empty()) {
 						Task* t = localQ.back();
 						localQ.pop_back();
-						SharedQueues::threadQs[qIndex]->push_bottom(t);
+						scheduler->threadQs[qIndex]->push_bottom(t);
 					}
 				}
 				task_to_run = immediateTask;
 				current_task = immediateTask;
 				immediateTask = nullptr;
-
 				immediate.store(false, std::memory_order_release);
 				is_handling_fork = true;
 			}
 		}
 		{
-			// --- 2. Local Worker queue  of set affinity---
+			// --- 2. Local Worker queue of set affinity ---
 			if (!localQ.empty()) {
 				task_to_run = localQ.back();
 				localQ.pop_back();
 			}
 
-			//--- 3 local work stealing queue of no affinity
+			// --- 3. Local work-stealing queue ---
 			if (!task_to_run) {
-				auto opt = SharedQueues::threadQs[qIndex]->pop_bottom();
+				auto opt = scheduler->threadQs[qIndex]->pop_bottom();
 				if (opt) {
 					Task* task = *opt;
 					if (!task) {
@@ -199,42 +185,32 @@ void T_Thread::Worker() {
 			}
 			// --- 4. Work stealing ---
 			if (!task_to_run) {
-				size_t numThreads = SharedQueues::threadQs.size();
+				size_t numThreads = scheduler->threadQs.size();
 				size_t start = rand() % numThreads;
 
 				for (size_t i = 0; i < numThreads; ++i) {
 					size_t target = (start + i) % numThreads;
 					if (target == qIndex) continue;
 
-					// Peek or pop the task
-					auto opt = SharedQueues::threadQs[target]->steal();
+					auto opt = scheduler->threadQs[target]->steal();
 					if (opt) {
-						Task* task = *opt;
-
-						// --- THE SAFETY CHECK ---
-						// We assume you have a way to get the fiber assigned to this task
-						// or that your Fiber class is the unit being queued.
-						task_to_run = task;
-						current_task = task;
+						task_to_run = *opt;
+						current_task = task_to_run;
 						break;
 					}
 				}
 			}
 		}
-		if(!task_to_run){
+		if (!task_to_run) {
 			// --- 5. Priority Queue ---
-			bool success = false;
 			Task* task;
-
 			for (int i = 0; i < 5; i++) {
-				success = SharedQueues::proirityQ[i].try_dequeue(task);
-				if (success) {
+				if (scheduler->priorityQ[i].try_dequeue(task)) {
 					task_to_run = task;
 					break;
 				}
 			}
 		}
-
 
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
@@ -244,13 +220,12 @@ void T_Thread::Worker() {
 
 			Fiber* f;
 			if (resuming) {
-				f = existingFiber; // switch back into the suspended fiber's saved context
+				f = existingFiber;
 			} else {
-				f = SharedQueues::fiberPool->Acquire();
+				f = scheduler->fiberPool->Acquire();
 				if (!f) {
 					std::cerr << "CRITICAL: Fiber pool exhausted!" << std::endl;
-					// Put task back so it isn't lost, then yield
-					SharedQueues::threadQs[qIndex]->push_bottom(task_to_run);
+					scheduler->threadQs[qIndex]->push_bottom(task_to_run);
 					std::this_thread::yield();
 					continue;
 				}
@@ -266,36 +241,28 @@ void T_Thread::Worker() {
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 			}
 
-			// Check why we returned: task finished or fiber suspended itself
 			if (f->status.load(std::memory_order_acquire) == FiberStatus::SUSPENDED) {
-				// Fiber is waiting on an event — keep it alive, Signal() will re-queue
-				// Decrement runningTasks so the arena/epoch accounting stays correct;
-				// Signal's Push() will re-increment it when the task resumes.
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			} else {
-				// Fiber ran to completion (FiberEntryWrapper marked it DEAD)
-				SharedQueues::fiberPool->Release(f);
+				scheduler->fiberPool->Release(f);
 				task_to_run->assignedFiber = nullptr;
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			}
 
-			if (is_handling_fork)
-			{
-				if (qIndex < SharedQueues::immediateCoresInUse.size()) {
-					SharedQueues::immediateCoresInUse[qIndex]->store(false, std::memory_order_release);
+			if (is_handling_fork) {
+				if (qIndex < (int)scheduler->immediateCoresInUse.size()) {
+					scheduler->immediateCoresInUse[qIndex]->store(false, std::memory_order_release);
 				}
 				is_handling_fork = false;
 			}
-		
-			if (SharedQueues::runningTasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-				// We are the LAST thread to finish! 
-				// It is safe for us to retire the arena.
-				OnFinishedArena(&SharedQueues::taskArena);
-			}	
-			if (retired.size() > 512) { // Only pay the mutex cost once every 512 objects
-				T_Threads::EpochManager::Instance().Tick();
+
+			if (scheduler->runningTasks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+				OnFinishedArena(&scheduler->taskArena);
+			}
+			if (retired.size() > 512) {
+				EpochManager::Instance().Tick();
 			}
 		}
 	}

@@ -2,6 +2,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 // Define these BEFORE including raylib or windows.h
 #define NOGDI              // Suppress GDI macros like Rectangle and DrawText

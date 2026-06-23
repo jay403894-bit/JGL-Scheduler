@@ -5,11 +5,13 @@
 #include <thread>
 #include <queue>
 #include "Task.h"
-#include "SharedQueues.h"
+#include "Fiber.h"
+#include "Arena.h"
 #include "Epochs.h"
 #include "Stack.h"
 
 namespace T_Threads {
+	class TaskScheduler;
     inline thread_local Task* current_task = nullptr;
     struct WaitHandle {
         Fiber* fiber;
@@ -23,7 +25,7 @@ namespace T_Threads {
         Task* currentRunningTask = nullptr;
         int qIndex = 0;
 
-        T_Thread();
+        T_Thread(TaskScheduler& scheduler);
         T_Thread(const T_Thread& other) = delete;
         T_Thread& operator=(const T_Thread& other) = delete;
         ~T_Thread();
@@ -42,6 +44,7 @@ namespace T_Threads {
     private:
         void Worker();
 
+        TaskScheduler* scheduler;
 		Stack<Fiber*> SuspendedFibers;
         std::atomic<int> qLoad{ 0 };
         std::atomic<bool> immediate{ false };
