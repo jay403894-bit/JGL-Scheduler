@@ -1,13 +1,15 @@
 #pragma once
 #include <functional>
 #include <atomic>
-
 namespace T_Threads {
+    struct Fiber;
+
     struct Task {
         using Func = void(*)(void*);
 
         Func fn;
         void* data = nullptr;
+        Fiber* assignedFiber = nullptr; 
         std::atomic<bool> stop_flag{ false };
         std::function<void()> onComplete;
         std::atomic<bool> complete{ false };

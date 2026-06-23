@@ -1,5 +1,5 @@
 #include "../include/TaskScheduler.h"
-
+#include "../include/Event.h"
 using namespace T_Threads;
 TaskScheduler::TaskScheduler(size_t poolSize) {
 	StartPool(poolSize);
@@ -27,21 +27,32 @@ void TaskScheduler::ProcessMainThread()
 	}
 }
 void TaskScheduler::Join() {
-	if (!poolActive) return;
-	stopFlag = true;
+    if (!poolActive) return;
+    
+    // 1. Tell everyone to stop accepting work
+    stopFlag.store(true, std::memory_order_release);
+    
+    // 2. Wake up everyone so they see the stop flag
+	std::lock_guard<std::mutex> lock(registryMtx);
+	for (auto& pair : eventRegistry) {
+		pair.second->SignalAll();
+	}
 	NotifyAll();
+    // 4. Wait for all worker threads to finish
 	for (auto& worker : workers) {
 		worker->Join();
 	}
-	{
-		std::lock_guard<std::mutex> lock(poolMutex);
-		workers.clear();
-		mainQ.clear();
-
-		SharedQueues::immediateCoresInUse.clear();
-
-	}
-	poolActive.store(false, std::memory_order_release);
+    
+    // 5. Cleanup
+    {
+        std::lock_guard<std::mutex> lock(poolMutex);
+        workers.clear();
+        mainQ.clear();
+        SharedQueues::immediateCoresInUse.clear();
+    }
+    
+    // 6. Final state
+    poolActive.store(false, std::memory_order_release);
 }
 
 void T_Threads::TaskScheduler::NotifyAll()
@@ -75,13 +86,8 @@ void T_Threads::TaskScheduler::ParallelFor(int start, int end, int chunkSize, st
 	for (auto* t : activeTasks) {
 		if (t == nullptr) continue;
 		while (!t->complete.load(std::memory_order_acquire)) {
-			Task* task = GetTask(); // Try to help with other tasks while waiting
-			if (task) {
-				task->Execute();
-				task->complete.store(true, std::memory_order_release);
-			}
-			else
-				std::this_thread::yield();
+			std::this_thread::yield();
+
 		}
 	}
 }
@@ -106,6 +112,7 @@ void T_Threads::TaskScheduler::ParallelForNB(int start, int end, int chunkSize, 
 }
 void TaskScheduler::StartPool(size_t poolSize) {
 	std::lock_guard<std::mutex> lock(poolMutex);
+
 	if (poolSize > std::thread::hardware_concurrency() - 1)
 		poolSize = std::thread::hardware_concurrency() - 1;
 	unsigned int hw = std::thread::hardware_concurrency();
@@ -121,7 +128,9 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
 	unsigned int num_workers = poolSize;
-
+	const size_t fibersPerWorker = 8;
+	size_t totalFibers = num_workers * fibersPerWorker;
+	SharedQueues::fiberPool = std::make_unique<FiberPool>(totalFibers);
 	workers.clear();
 	SharedQueues::threadQs.clear();
 	workers.reserve(num_workers);
@@ -149,6 +158,20 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	}
 	poolActive.store(true, std::memory_order_release);
 }
+void TaskScheduler::WaitOnEvent(const std::string& eventName) {
+	// 1. Get current thread info
+	auto* thread = T_Thread::GetCurrent();
+	Task* myTask = thread->currentRunningTask;
+	Fiber* myFiber = myTask->assignedFiber;
+
+	// 2. Get the event and register this task
+	auto& event = GetEvent(eventName);
+	event.AddWaiter(myTask);
+
+	// 3. Now, call the internal suspend/switch logic
+	// This part is the ONLY place context switching happens
+	ContextSwitch(&myFiber->ctx, &thread->schedulerCtx);
+}
 bool TaskScheduler::Push(Task* task)
 {
 	return PushLocal(task);
@@ -170,6 +193,13 @@ bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task)
 	if (!task)
 		return false;
 	return Push(cpu_affinity, task);
+}
+Event& TaskScheduler::GetEvent(const std::string& name) {
+	std::lock_guard<std::mutex> lock(registryMtx);
+	if (eventRegistry.find(name) == eventRegistry.end()) {
+		eventRegistry[name] = std::make_unique<Event>();
+	}
+	return *eventRegistry[name];
 }
 void TaskScheduler::Pause() {
 	SharedQueues::paused.store(true, std::memory_order_release);
@@ -195,24 +225,26 @@ Task* TaskScheduler::GetTask() {
 		}
 	}
 	if (!task_to_run) {
-		for (size_t i = 0; i < SharedQueues::threadQs.size(); ++i) {
-			auto opt = SharedQueues::threadQs[i]->steal();
+		size_t numThreads = SharedQueues::threadQs.size();
+		size_t start = rand() % numThreads;
+
+		for (size_t i = 0; i < numThreads; ++i) {
+			size_t target = (start + i) % numThreads;
+
+			auto opt = SharedQueues::threadQs[target]->steal();
 			if (opt) {
 				task_to_run = *opt;
 				current_task = task_to_run;
 				break;
 			}
-		
 		}
 	}
 	return task_to_run;
 }
 void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
 	for (auto* t : tasks) {
-		// A slightly better way to wait than just yield()
 		while (!t->complete.load(std::memory_order_acquire)) {
-			// This is "exponential backoff" - it reduces CPU usage while waiting
-			Task* task = GetTask(); // Try to help with other tasks while waiting
+			Task* task = GetTask();
 			if (task) {
 				task->Execute();
 				task->complete.store(true, std::memory_order_release);
@@ -226,17 +258,7 @@ Arena* T_Threads::TaskScheduler::GetArena()
 {
 	return SharedQueues::taskArena.GetActive();
 }
-void TaskScheduler::WaitAll() {
-	while (SharedQueues::runningTasks.load(std::memory_order_acquire) > 0) {
-		Task* task = GetTask(); // Try to help with other tasks while waiting
-		if (task) {
-			task->Execute();
-			task->complete.store(true, std::memory_order_release);
-		}
-		else
-			std::this_thread::yield();
-	}
-}
+
 
 Task* T_Threads::TaskScheduler::CreateTask(void(*fn)(void*), void* data)
 {

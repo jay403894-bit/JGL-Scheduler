@@ -1,5 +1,7 @@
 C:\Users\jay40\source\repos\T_Threads\T_Threads\main.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\main.obj
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\Epochs.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\Epochs.obj
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\Fiber.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\Fiber.obj
+C:\Users\jay40\source\repos\T_Threads\T_Threads\src\FiberPool.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\FiberPool.obj
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskDAG.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\TaskDAG.obj
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\TaskScheduler.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\TaskScheduler.obj
 C:\Users\jay40\source\repos\T_Threads\T_Threads\src\T_Thread.cpp;C:\Users\jay40\source\repos\T_Threads\T_Threads\T_Threads\x64\Debug\T_Thread.obj

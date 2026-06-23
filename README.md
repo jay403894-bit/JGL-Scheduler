@@ -2,7 +2,7 @@
 
 
 
-A high-performance, lightweight lockfree-ish where applicable C++ task scheduler with thread affinity and work-stealing queues.
+A high-performance, lightweight lockfree-ish where applicable C++ fibers task scheduler/jobs system with thread affinity and work-stealing queues.
 
 
 
@@ -31,6 +31,8 @@ Feel free to explore and experiment with the scheduler. Pull requests or ideas w
 - **Lightweight:** lockfree where applicable, very few locks used only where necessary, atomic operations for performance.
 
 - **DAG:** Supports task dependency graphing with optional TaskDAG
+
+- **Fibers:** runs using usermode fibers for efficiency
 
 - **memory management:* Arena allocation and epochs used for garbage collection, simply         T_Threads::EpochManager::Instance().Tick(); at the end of your frame/main loop and include "Epochs.h" in your main loop file.
 
@@ -261,6 +263,16 @@ in the tasks void* data, send a pointer to the task itself as a parameter.
 then run task->SignalComplete() when the subsystem is active and ready instead of waiting for it to finish!
 
 this will signal to the dag to run any dependent task on that service!
+
+
+----------------
+suspending tasks
+----------------
+
+fibers allow us to suspend tasks, (documentation to be improved in the future) 
+to do so, use the included Event.h event system to declare events and subscribe tasks as waiters 
+this can suspend and then signal them to awaken later and switch back context
+
 ---------------------------
 Limitations / Known Issues
 ---------------------------

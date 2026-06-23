@@ -7,7 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Define your library
 add_library(T_Threads 
+    src/ContextSwitch.asm
     src/Epochs.cpp
+    stc/Fiber.cpp
+    stc/FiberPool.cpp
     src/T_Thread.cpp
     src/TaskDAG.cpp
     src/TaskScheduler.cpp 

@@ -88,48 +88,7 @@ void MyWorkFunction(int start, int end) {
         sum += i;
     }
 }
-void TestBareMetal(int start, int end, int chunkSize) {
-    auto& scheduler = T_Threads::TaskScheduler::Instance();
-    chunkSize = std::max(1, chunkSize);
-    int totalItems = end - start;
-    if (totalItems <= 0) return;
 
-    int numTasks = (totalItems + chunkSize - 1) / chunkSize;
-
-    auto counter = std::make_shared<std::atomic<int>>(numTasks);
-    auto tasksExecuted = std::make_shared<std::atomic<int>>(0);
-    auto itemsProcessed = std::make_shared<std::atomic<int>>(0);
-	std::vector<T_Threads::Task*> activeTasks;
-    for (int i = 0; i < numTasks; ++i) {
-        int chunkStart = start + i * chunkSize;
-        int chunkEnd = std::min(chunkStart + chunkSize, end);
-        // capture counter by value (copies the shared_ptr, not the atomic)
-
-        auto t = scheduler.CreateTask([=]() {
-            MyWorkFunction(chunkStart, chunkEnd);
-            counter->fetch_sub(1, std::memory_order_acq_rel);
-            tasksExecuted->fetch_add(1, std::memory_order_acq_rel);
-            itemsProcessed->fetch_add(chunkEnd - chunkStart);
-            });
-        scheduler.Push(t);
-        activeTasks.push_back(t);
-        printf("Tasks: %d, Items: %d\n", tasksExecuted->load(), itemsProcessed->load());
-
-    }
-
-    scheduler.NotifyAll();
-    printf("Total items: %d, Num tasks: %d, Chunk size: %d\n", totalItems, numTasks, chunkSize);
-    int completed = 0;
-    for (auto* t : activeTasks) {
-        if (t == nullptr) continue;
-        while (!t->complete.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
-        completed++;
-    }
-    printf(counter->load(std::memory_order_acquire) == 0 ? "All tasks completed successfully.\n" : "Error: Some tasks did not complete.\n");
-	printf("Verified %d/%d tasks completed.\n", completed, numTasks);
-}
 int main() {
     auto& scheduler = T_Threads::TaskScheduler::Instance();
 
@@ -139,14 +98,11 @@ int main() {
 
     // You call your existing ParallelForNB directly.
     // You pass the function pointer (or lambda) directly.
-   scheduler.ParallelFor(start, end, chunkSize, MyWorkFunction);
-	//TestBareMetal(start, end, chunkSize);
     // Add a wait here if your scheduler doesn't block automatically
     // or just let it finish while you debug the worker threads.
 
-    return 0;
-}
-    /*
+
+    
     const int iterations = 10;
     const int tasksPerIteration = 100;
     int ctr = 0;
@@ -158,7 +114,7 @@ int main() {
             int* id = new int(t);
 
             Task* task = scheduler.CreateTask(simpleTaskFn, id);
-            scheduler.PushToCore(task);
+            scheduler.Push(task);
              tasks.push_back(task);
              std::this_thread::yield();
         }
@@ -169,8 +125,9 @@ int main() {
 
 
     scheduler.Wait(tasks);
-    RunDAGTest(); */
+    RunDAGTest(); 
+    scheduler.ParallelFor(start, end, chunkSize, MyWorkFunction);
 
 
-  //  return 0;
-//}
+   return 0;
+}

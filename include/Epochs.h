@@ -19,15 +19,17 @@ namespace T_Threads {
 	extern thread_local size_t thread_id;
 	inline std::atomic<size_t>  thread_counter;
 	extern thread_local std::vector<RetiredAlloc> retired;
-
+	extern thread_local Task* currentRunningTask;
 	class EpochManager {
 	private:
 		std::mutex retireMutex;
-		struct RetiredArena {
-			Arena* arena;
+		struct GlobalRetired {
+			void* ptr;        // Could be the node pointer OR the arena pointer
 			size_t epoch;
+			bool isArena;     // Flag to differentiate
+			void (*deleter)(void*);
 		};
-		std::vector<RetiredArena> globalRetiredList;
+		std::vector<GlobalRetired> globalRetiredList;
 
 		std::atomic<size_t> globalEpoch{ 0 };
 
@@ -81,7 +83,14 @@ namespace T_Threads {
 			auto it = globalRetiredList.begin();
 			while (it != globalRetiredList.end()) {
 				if (it->epoch < safeEpoch) {
-					it->arena->clear(); 
+					if (it->isArena) {
+						// Cast back to Arena and clear
+						static_cast<Arena*>(it->ptr)->clear();
+					}
+					else {
+						// Call the standard node deleter
+						it->deleter(it->ptr);
+					}
 					it = globalRetiredList.erase(it);
 				}
 				else {
@@ -105,18 +114,38 @@ namespace T_Threads {
 			}
 			return minEpoch;
 		}
-		template<typename T>
+		/*template<typename T>
 		void RetirePtr(void* p, size_t epoch, Arena* arena) {
 			retired.push_back({ p, epoch, [](void* ptr) {
 			} });
+		}*/
+		// For individual nodes
+		template<typename T>
+		void RetirePtr(T* p, size_t epoch) {
+			std::lock_guard<std::mutex> lock(retireMutex);
+			globalRetiredList.push_back({ (void*)p, epoch, false, [](void* ptr) {
+				delete static_cast<T*>(ptr);
+			} });
 		}
+
+		// For Arena blocks
 		void RetireArena(Arena* arena, size_t epoch) {
 			std::lock_guard<std::mutex> lock(retireMutex);
-			globalRetiredList.push_back({ arena, epoch });
+			globalRetiredList.push_back({ (void*)arena, epoch, true, nullptr });
 		}
 	private:
 		void AdvanceEpoch() { globalEpoch.fetch_add(1, std::memory_order_acq_rel); }
 
 
 	};
+};
+
+struct EpochGuard {
+	size_t tid;
+	EpochGuard(size_t id) : tid(id) {
+		T_Threads::EpochManager::Instance().EnterEpoch(tid);
+	}
+	~EpochGuard() {
+		T_Threads::EpochManager::Instance().LeaveEpoch(tid);
+	}
 };

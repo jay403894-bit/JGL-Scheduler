@@ -4,6 +4,7 @@
 #include "MPSCQueue.h"
 #include "../include/blockingconcurrentqueue.h"
 #include "Arena.h"
+#include "FiberPool.h"
 #include <atomic>
 #include <array>
 namespace T_Threads {
@@ -13,6 +14,7 @@ namespace T_Threads {
     };
 
     namespace SharedQueues {
+        inline std::unique_ptr<FiberPool> fiberPool;
         inline ArenaPool taskArena{ 10 * 1024 * 1024 }; // 10 MB arena for tasks, adjust as needed
         inline std::atomic<int> runningTasks{ 0 };
         inline std::vector<std::unique_ptr<std::atomic<bool>>> immediateCoresInUse;

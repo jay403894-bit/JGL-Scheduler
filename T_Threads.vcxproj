@@ -56,6 +56,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -120,7 +121,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_AMD64_;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
@@ -135,6 +136,8 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="src\Epochs.cpp" />
+    <ClCompile Include="src\Fiber.cpp" />
+    <ClCompile Include="src\FiberPool.cpp" />
     <ClCompile Include="src\TaskDAG.cpp" />
     <ClCompile Include="src\TaskScheduler.cpp" />
     <ClCompile Include="src\T_Thread.cpp" />
@@ -143,12 +146,18 @@
     <ClInclude Include="include\Arena.h" />
     <ClInclude Include="include\blockingconcurrentqueue.h" />
     <ClInclude Include="include\concurrentqueue.h" />
+    <ClInclude Include="include\Context.h" />
     <ClInclude Include="include\Epochs.h" />
+    <ClInclude Include="include\Event.h" />
+    <ClInclude Include="include\Fiber.h" />
+    <ClInclude Include="include\FiberPool.h" />
+    <ClInclude Include="include\FiberStackArena.h" />
     <ClInclude Include="include\lightweightsemaphore.h" />
     <ClInclude Include="include\LockFreeList.h" />
     <ClInclude Include="include\MPSCQueue.h" />
     <ClInclude Include="include\platform.h" />
     <ClInclude Include="include\SharedQueues.h" />
+    <ClInclude Include="include\Stack.h" />
     <ClInclude Include="include\Task.h" />
     <ClInclude Include="include\TaskDAG.h" />
     <ClInclude Include="include\TaskDeque.h" />
@@ -157,7 +166,11 @@
     <ClInclude Include="include\TaskScheduler.h" />
     <ClInclude Include="include\T_Thread.h" />
   </ItemGroup>
+  <ItemGroup>
+    <MASM Include="src\ContextSwitch.asm" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
 </Project>

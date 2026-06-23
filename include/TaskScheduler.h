@@ -6,8 +6,10 @@
 #include "MPSCQueue.h"
 #include "Arena.h"
 #include "Epochs.h"
+#include "FiberPool.h"
 
 namespace T_Threads {
+	class Event;
 	class TaskScheduler {
 	public:
 		static TaskScheduler& Instance() {
@@ -26,13 +28,13 @@ namespace T_Threads {
 		bool PushPQ(Task* task);
 		bool PushPQ(uint8_t priority, Task* task);
 		bool PushFork(uint8_t cpu_affinity, Task* task);
+		Event& GetEvent(const std::string& name);
 		void Pause();
 		void Resume();
 		void Stop(Task* worker_task);
 
 		void Wait(const std::vector<Task*>& tasks);
 		Arena* GetArena();
-		void WaitAll();
 
 		Task* CreateTask(void(*fn)(void*), void* data);
 
@@ -76,12 +78,14 @@ namespace T_Threads {
 	private:
 		Task* GetTask();
 		void StartPool(size_t poolSize);
+		void WaitOnEvent(const std::string& eventName);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToPQ(Task* task, uint8_t priority = 3);
 		bool PushToCore(size_t core_id, Task* task);
 		TaskScheduler(size_t poolSize = std::thread::hardware_concurrency() - 1);
 		int PickNextWorker();
-
+		std::unordered_map<std::string, std::unique_ptr<Event>> eventRegistry;
+		std::mutex registryMtx;
 		std::atomic<bool> poolActive{ false };
 		std::atomic<int> nextWorker{ 0 };
 		std::atomic<bool> stopFlag{ false };
