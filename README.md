@@ -1,6 +1,6 @@
 # T_Threads
 
-A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, work-stealing queues, and priority support.
+A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
 
 ---
 
@@ -8,7 +8,6 @@ A high-performance, lightweight C++17 fibers-based task scheduler / job system w
 
 - **Thread Pool** — Configurable worker threads (defaults to one per core)
 - **Local Queues + Work-Stealing** — Excellent cache locality with automatic stealing when idle
-- **Priority Queues** — 5 priority levels
 - **Fibers** — Efficient user-mode context switching
 - **Task DAG** — Full dependency graph support
 - **ParallelFor** — Blocking and non-blocking variants
@@ -55,8 +54,6 @@ Scheduling
 C++scheduler.Push(task);           // Load-balanced (round-robin)
 scheduler.Push(1, task);        // Hint to specific core (work-stealing allowed)
 
-scheduler.PushPQ(task);         // Default priority
-scheduler.PushPQ(0, task);      // Specific priority (0-4)
 ParallelFor
 C++scheduler.ParallelFor(0, 10000, 128, [&](int start, int end) {
     for (int i = start; i < end; ++i) {
@@ -95,5 +92,4 @@ Be mindful of raw pointers and task lifetimes
 Notes
 
 Local queues execute pinned tasks before stealing work.
-Priority queues are processed after local work is done.
 Feel free to experiment and submit pull requests!
