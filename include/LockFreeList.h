@@ -6,90 +6,97 @@
 #include <intrin.h>
 #include <limits>
 #include <cstdint>
+#include "Epochs.h"
 #include "TaskScheduler.h"
-
 namespace T_Threads {
-	struct LNodeBase; 
+	struct LNodeBase; // forward declaration
+
+	// MarkableReference stores a Node* and a bool mark
 	struct LMarkableReference {
-		LNodeBase* val;
-		bool marked;
+		LNodeBase* val_;
+		bool marked_;
 
 		LMarkableReference(LNodeBase* val = nullptr, bool mark = false)
-			: val(val), marked(mark) {}
+			: val_(val), marked_(mark) {}
 	};
 
+	// Hardcoded MarkablePointer for Node*
 	struct LMarkablePointer {
-		std::atomic<uintptr_t> ref{ 0 };
+		std::atomic<uintptr_t> ref_{ 0 };
 
+		// Packing: Use the last bit for the mark
 		static uintptr_t pack(LNodeBase* ptr, bool mark) {
 			return reinterpret_cast<uintptr_t>(ptr) | (mark ? 1ULL : 0ULL);
 		}
+
 		static LNodeBase* unpackPtr(uintptr_t val) {
 			return reinterpret_cast<LNodeBase*>(val & ~1ULL);
 		}
+
 		static bool unpackMark(uintptr_t val) {
 			return (val & 1ULL) != 0;
 		}
 
+		// Default: empty/null
 		LMarkablePointer(LNodeBase* val = nullptr, bool mark = false) {
-			ref.store(pack(val, mark), std::memory_order_release);
+			ref_.store(pack(val, mark), std::memory_order_release);
 		}
-
-		LNodeBase* getReference() const {
-			return unpackPtr(ref.load(std::memory_order_acquire));
-		}
-
 		bool getMark() const {
-			return unpackMark(ref.load(std::memory_order_acquire));
+			return (ref_.load(std::memory_order_acquire) & 1ULL) != 0;
 		}
-
-		LNodeBase* get(bool& mark) const {
-			uintptr_t val = ref.load(std::memory_order_acquire);
-			mark = unpackMark(val);
-			return unpackPtr(val);
+		void set(LNodeBase* val, bool mark) {
+			// pack() uses the bitwise OR logic to combine the pointer and the mark
+			ref_.store(pack(val, mark), std::memory_order_release);
 		}
-
+		// 2. Flip the bit without any allocations
 		bool attemptMark(LNodeBase* expectedPtr, bool newMark) {
-			uintptr_t curr = ref.load(std::memory_order_acquire);
+			uintptr_t curr = ref_.load(std::memory_order_acquire);
 			while (true) {
-				LNodeBase* ptr = unpackPtr(curr);
-				bool mark = unpackMark(curr);
+				LNodeBase* ptr = reinterpret_cast<LNodeBase*>(curr & ~1ULL);
+				bool mark = (curr & 1ULL) != 0;
 
 				if (ptr != expectedPtr) return false;
 				if (mark == newMark) return true;
 
-				uintptr_t desired = pack(ptr, newMark);
-				if (ref.compare_exchange_weak(curr, desired, std::memory_order_acq_rel))
+				uintptr_t desired = reinterpret_cast<uintptr_t>(ptr) | (newMark ? 1ULL : 0ULL);
+				if (ref_.compare_exchange_weak(curr, desired, std::memory_order_acq_rel))
 					return true;
 			}
 		}
-
-		void set(LNodeBase* val, bool mark) {
-			ref.store(pack(val, mark), std::memory_order_release);
+		// Atomic Get
+		LNodeBase* get(bool& mark) const {
+			uintptr_t val = ref_.load(std::memory_order_acquire);
+			mark = unpackMark(val);
+			return unpackPtr(val);
 		}
-
+		LNodeBase* getReference() const {
+			// Load the atomic value
+			uintptr_t val = ref_.load(std::memory_order_acquire);
+			// Mask out the LSB (Least Significant Bit) and cast back to pointer
+			return reinterpret_cast<LNodeBase*>(val & ~1ULL);
+		}
+		// Atomic CAS
 		bool compareAndSet(LNodeBase* expectedPtr, LNodeBase* newPtr, bool expectedMark, bool newMark) {
-			uintptr_t curr = pack(expectedPtr, expectedMark);
+			uintptr_t expected = pack(expectedPtr, expectedMark);
 			uintptr_t desired = pack(newPtr, newMark);
-			return ref.compare_exchange_strong(curr, desired, std::memory_order_acq_rel);
+			return ref_.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
 		}
 	};
 	struct LNodeBase {
-		LMarkablePointer next;   
-		uint64_t key;          
+		LMarkablePointer next;   // always points to NodeBase*
+		uint64_t key;           // keep the key here for traversal/comparison
 	};
 	template<typename T>
 	struct LNode : LNodeBase {
-		T data;  
-		LNode(uint64_t k, T d) { 
+		T data;  // actual payload
+		LNode(uint64_t k, T d) {  // accept T by value
 			key = k;
 			data = d;
 		}
 	};
 
 	template <typename T>
-	class LockFreeList {
-		Arena* arena;
+	class List {
 		struct Window {
 			LNodeBase* pred;
 			LNodeBase* curr;
@@ -123,55 +130,105 @@ namespace T_Threads {
 			}
 		};
 
+		static void slabDeleter(void* ptr) {
+			auto* node = static_cast<LNode<T>*>(ptr);
+
+			// 1. If you used placement new, explicitly destroy
+			node->data.~T();
+
+			// 2. Return the raw memory block to the EXACT allocator that gave it to you
+			TaskScheduler::Instance().GetAllocator()->Free(node);
+		}
+		static void heapDeleter(void* ptr) {
+			auto* node = static_cast<LNode<T>*>(ptr);
+			// 1. Manually call the destructor of the data if T is a complex object
+			node->data.~T();
+			// 2. Use 'delete' since you used 'new'
+			delete node;
+		}
 		LNodeBase* head;
 		LNodeBase* tail;
 	public:
-		LockFreeList(Arena* arena) : arena(arena) {
-			void* memHead = arena->allocate(sizeof(LNode<T>));
-			void* memTail = arena->allocate(sizeof(LNode<T>));
-			head = new (memHead) LNode<T>(0, T());
-			tail = new (memTail) LNode<T>(UINT64_MAX, T());
+		List() {
+			void* mem = TaskScheduler::Instance().GetAllocator()->Alloc();
+			void* mem2 = TaskScheduler::Instance().GetAllocator()->Alloc();
+			head = new (mem) LNode<T>(0, T());
+			tail = new (mem2) LNode<T>(UINT64_MAX, T());
 			head->next.set(tail, false);
 		}
-		~LockFreeList() {}
+		~List() {
+			delete head;
+			delete tail;
+		}
 		bool add(uint64_t key, T item) {
+			EpochManager::Instance().EnterEpoch(thread_id);
 			while (true) {
 				Window window = Window::find(head, key);
 				LNode<T>* pred = static_cast<LNode<T>*>(window.pred);
 				LNode<T>* curr = static_cast<LNode<T>*>(window.curr);
 
-				if (curr->key == key)
+				if (curr->key == key) {
+					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return false;
-
-				void* mem = arena->allocate(sizeof(LNode<T>));
+				}
+				void* mem = TaskScheduler::Instance().GetAllocator()->Alloc();
 				LNode<T>* node = new (mem) LNode<T>(key, item);
 				node->next.set(curr, false);
 
 				if (pred->next.compareAndSet(curr, node, false, false)) {
+					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return true;
 				}
 			}
 		}
 		bool remove(uint64_t key) {
+			EpochManager::Instance().EnterEpoch(thread_id); // enter epoch
 			bool snip = false;
 			while (true) {
 				Window window = Window::find(head, key);
 				LNode<T>* pred = static_cast<LNode<T>*>(window.pred);
 				LNode<T>* curr = static_cast<LNode<T>*>(window.curr);
 				if (curr->key != key) {
+					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return false;
 				}
 				else {
-					LNode<T>* succ = curr->next.getReference();
+					LNode<T>* succ = static_cast<LNode<T>*>(curr->next.getReference());
 					snip = curr->next.attemptMark(succ, true);
 					if (!snip)
 						continue;
 					pred->next.compareAndSet(curr, succ, false, false);
+					EpochManager::Instance().RetirePtr(
+						curr,
+						EpochManager::Instance().CurrentEpoch(),
+						&List<T>::slabDeleter
+					);					
+					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return true;
 				}
 			}
 		}
+		template <typename F>
+		void for_each(F func) {
+			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
+			// Start after the sentinel head
+			LNodeBase* curr = head->next.getReference();
+
+			while (curr != tail) {
+				// Use your new bit-packed methods
+				bool marked = curr->next.getMark();
+				LNodeBase* succ = curr->next.getReference();
+
+				if (!marked) {
+					// Cast to the internal node type to access the data
+					LNode<T>* typedNode = static_cast<LNode<T>*>(curr);
+					func(typedNode->data);
+				}
+				curr = succ;
+			}
+		}
 		bool contains(uint64_t key) {
+			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
 			LNodeBase* curr = head;
 
 			while (curr != nullptr) {
@@ -187,6 +244,7 @@ namespace T_Threads {
 			return false;
 		}
 		T* get(uint64_t key) {
+			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
 			bool marked = false;
 			LNodeBase* curr = head;
 
@@ -201,18 +259,8 @@ namespace T_Threads {
 
 			return nullptr;  // not found
 		}
-		template <typename F>
-		void for_each(F func) {
-			LNodeBase* curr = head->next.getReference();
-			while (curr != tail) {
-				bool marked = false;
-				LNodeBase* succ = curr->next.get(marked);
-				if (!marked) {
-					LNode<T>* typedNode = static_cast<LNode<T>*>(curr);
-					func(typedNode->data);
-				}
-				curr = succ;
-			}
-		}
 	};
+
+
+
 };

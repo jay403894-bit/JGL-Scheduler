@@ -2,7 +2,12 @@
 #include "../include/TaskScheduler.h"
 #include "../include/Event.h"
 using namespace T_Threads;
+
+static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
+static_assert(alignof(Task) <= 16, "Task over-aligned for a slot");
+
 TaskScheduler* TaskScheduler::instance = nullptr;
+GlobalFiberPool* TaskScheduler::globalPool = nullptr;
 
 TaskScheduler::TaskScheduler(size_t poolSize) {
 	StartPool(poolSize);
@@ -17,6 +22,15 @@ void TaskScheduler::Init(size_t poolSize) {
 	if (instance != nullptr)
 		throw std::runtime_error("TaskScheduler already initialized!");
 	instance = new TaskScheduler(poolSize);
+	// globalPool is created inside StartPool() (via the TaskScheduler ctor above)
+	// using GlobalFiberPool::Create(); GlobalFiberPool has no default ctor.
+}
+GlobalFiberPool& T_Threads::TaskScheduler::GetGlobalPool()
+{
+	if (!instance->globalPool)
+		throw std::runtime_error("GlobalFiberPool not initialized!");
+	return *instance->globalPool;
+
 }
 TaskScheduler::~TaskScheduler() {
 	if (!stopFlag)
@@ -75,49 +89,67 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 	Task** taskPtrs = new Task * [numTasks];
 	int created = 0;
 
+	// Completion is tracked by this STACK-LOCAL counter -- NOT by polling the Task
+	// objects. A worker destroys+frees each Task the instant its fiber goes DEAD
+	// (T_Thread::Worker, the FiberStatus::DEAD branch), so the old code's
+	// `taskPtrs[i]->complete` poll was a use-after-free: it read a slab slot that had
+	// already been freed and frequently recycled into a brand-new Task (complete==false
+	// again) -> spin forever (hang) or read unmapped memory (crash). This counter lives
+	// on our stack frame, which outlives every chunk because we block below until it
+	// hits zero. Each chunk decrements it as the LAST thing inside Execute(), before the
+	// worker is allowed to free the Task. `remaining` and `func` are captured by
+	// reference -- safe precisely because we don't return until remaining == 0.
+	std::atomic<int> remaining{ 0 };
+
 	// 1. Create tasks. If the arena is exhausted (CreateTask returns nullptr),
 	//    run that chunk inline on the caller rather than dereferencing null.
 	for (int i = 0; i < numTasks; ++i) {
 		int chunkStart = start + i * chunkSize;
 		int chunkEnd = std::min(chunkStart + chunkSize, end);
 
-		Task* t = CreateTask([=]() { func(chunkStart, chunkEnd); });
+		Task* t = CreateTask([&remaining, &func, chunkStart, chunkEnd]() {
+			func(chunkStart, chunkEnd);
+			remaining.fetch_sub(1, std::memory_order_acq_rel);
+		});
 		if (!t) {
-			func(chunkStart, chunkEnd); // graceful degradation: do it here
+			func(chunkStart, chunkEnd); // graceful degradation: do it here (no counter touch)
 			continue;
 		}
+		// Count it BEFORE it can possibly run (we push only after this loop).
+		remaining.fetch_add(1, std::memory_order_relaxed);
 		taskPtrs[created++] = t;
 	}
 
 	if (created > 0) {
-		runningTasks.fetch_add(created, std::memory_order_relaxed);
+		pendingTasks.fetch_add(created, std::memory_order_relaxed);
 
 		// 2. Distribute across all workers' inboxes (round-robin). Dumping the
 		//    whole batch on one worker pins it in the inbox->deque drain loop and
 		//    hangs when created > deque capacity (large range / small chunkSize)
 		//    or when there's only one worker. (push handles the next-link itself.)
+		//    After this loop we never touch taskPtrs[i] again -- a worker may have
+		//    already freed it.
 		size_t n = inboxes.size();
 		for (int i = 0; i < created; ++i) {
 			inboxes[i % n]->push(taskPtrs[i]);
 		}
 		NotifyAll();
 
-		// 3. Wait for completion, but HELP while waiting so the calling thread
-		//    makes progress too. Pure spinning deadlocks when ParallelFor runs on
-		//    a worker fiber (nested) or when there's only one worker. GetTask()
-		//    steals a task out of a deque -- removed exactly once -- so running it
-		//    here can't double-execute; we decrement runningTasks because the
-		//    owning worker will never see it.
-		for (int i = 0; i < created; ++i) {
-			while (!taskPtrs[i]->complete.load(std::memory_order_acquire)) {
-				Task* helped = GetTask();
-				if (helped) {
-					helped->Execute();
-					runningTasks.fetch_sub(1, std::memory_order_acq_rel);
-				}
-				else {
-					std::this_thread::yield();
-				}
+		// 3. Wait on the counter, HELPING while we wait so the calling thread makes
+		//    progress too. Pure spinning deadlocks when ParallelFor runs on a worker
+		//    fiber (nested) or when there's only one worker. GetTask() steals a task
+		//    out of a deque -- removed exactly once -- so running it here can't
+		//    double-execute; we decrement pendingTasks because the owning worker will
+		//    never see it. (A helped chunk still decrements `remaining` from inside
+		//    its own Execute(), so the wait terminates regardless of who runs it.)
+		while (remaining.load(std::memory_order_acquire) > 0) {
+			Task* helped = GetTask();
+			if (helped) {
+				helped->Execute();
+				pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+			}
+			else {
+				std::this_thread::yield();
 			}
 		}
 	}
@@ -126,7 +158,7 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 
 	// 4. Batch is done and no longer referenced by us. Recycle the arena it
 	//    came from — but only if the whole system is quiescent (see RecycleArena).
-	RecycleArena();
+	//RecycleArena();
 }
 void TaskScheduler::ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func) {
 	chunkSize = std::max(1, chunkSize);
@@ -153,9 +185,14 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
 
-	const size_t fibersPerWorker = 32;
-	globalPool = std::make_unique<FiberPool>(num_workers * fibersPerWorker);
+	unsigned int coreCount = std::thread::hardware_concurrency();
+	if (coreCount == 0) coreCount = 4; // Fallback
 
+	size_t standardFiberCount = coreCount * 64;
+	size_t heavyFiberCount = coreCount * 8;
+
+	// GlobalFiberPool now owns all fibers and stack allocation
+	globalPool = GlobalFiberPool::Create(standardFiberCount, heavyFiberCount);
 	workers.clear();
 	threadQs.clear();
 	immediateCoresInUse.clear();
@@ -191,15 +228,43 @@ void TaskScheduler::WaitOnEvent(const std::string& eventName) {
 	auto& event = GetEvent(eventName);
 	event.AddWaiter(myTask);
 
-	ContextSwitch(&myFiber->ctx, &thread->schedulerCtx);
+	// Return via the fiber's homeCtx (the worker stamps it before each switch-in),
+	// not thread_local schedulerCtx -- the waiter resumes on whatever worker the
+	// event signal lands on, which may differ from this one.
+	ContextSwitch(&myFiber->ctx, myFiber->homeCtx);
 }
 bool TaskScheduler::Push(Task* task) {
 	return PushLocal(task);
 }
 
-bool T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity = 0)
+void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
 {
-	return PushBatchLocal(tasks, count, cpuaffinity);
+	// 1. Manually link them locally: Task A -> Task B -> Task C
+	for (size_t i = 0; i < count - 1; ++i) {
+		tasks[i]->next.store(tasks[i + 1], std::memory_order_relaxed);
+	}
+	// The last task's next is already handled by the queue's exchange logic
+	pendingTasks.fetch_add(count, std::memory_order_relaxed);
+	// 2. Submit the pointers directly - NO wrappers, NO heap allocation
+	if (cpuaffinity == 0)
+	{
+		int chosen = PickNextWorker();
+		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
+			_mm_pause();
+			chosen = PickNextWorker();
+		}
+		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1], count);
+
+	}
+	else
+	{
+		int chosen = cpuaffinity - 1;
+		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
+			_mm_pause();
+			chosen = PickNextWorker();
+		}
+		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1], count);
+	}
 }
 
 bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task) {
@@ -251,55 +316,30 @@ void TaskScheduler::Wait(const std::vector<Task*>& tasks) {
 			Task* task = GetTask();
 			if (task) {
 				task->Execute();   // Execute() sets complete; decrement since the
-				runningTasks.fetch_sub(1, std::memory_order_acq_rel); // worker won't
+				pendingTasks.fetch_sub(1, std::memory_order_acq_rel); // worker won't
 			}
 			else
 				std::this_thread::yield();
 		}
 	}
 	// Tasks waited on are done; recycle if the system is quiescent.
-	RecycleArena();
+}
+TaskAllocator* TaskScheduler::GetAllocator() {
+	return &taskAllocator;
 }
 void TaskScheduler::WaitAll() {
-	while (runningTasks.load(std::memory_order_acquire) > 0)
+	while (pendingTasks.load(std::memory_order_acquire) > 0)
 		std::this_thread::yield();
 }
-Arena* TaskScheduler::GetArena() {
-	return taskArena.GetActive();
-}
-void TaskScheduler::RecycleArena() {
-	for (int spins = 0; spins < 4096; ++spins) {
-		if (runningTasks.load(std::memory_order_acquire) == 0) break;
-		std::this_thread::yield();
-	}
-	if (runningTasks.load(std::memory_order_acquire) != 0) return;
 
-	size_t epoch = EpochManager::Instance().CurrentEpoch();
-	Arena* active = taskArena.GetActive();
-	EpochManager::Instance().RetireArena(active, epoch);
-	taskArena.Rotate();
-	EpochManager::Instance().Tick();
-}
-Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data) {
-	void* mem = taskArena.GetActive()->allocate(sizeof(Task));
+Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, FiberSize size) {
+	void* mem = taskAllocator.Alloc();
 	if (!mem) return nullptr;
-	return new (mem) Task(fn, data);
-}
-void* TaskScheduler::AllocateFromArena(size_t size) {
-	return taskArena.GetActive()->allocate(size);
+	Task* t = new (mem) Task(fn, data, size);
+	t->ownedBySlab = true;   // reclaimed via the slab on completion
+	return t;
 }
 
-bool TaskScheduler::PushBatchLocal(Task* tasks[], size_t count, uint8_t cpuaffinity) {
-	// 1. Manually link them locally: Task A -> Task B -> Task C
-	for (size_t i = 0; i < count - 1; ++i) {
-		tasks[i]->next.store(tasks[i + 1], std::memory_order_relaxed);
-	}
-	// The last task's next is already handled by the queue's exchange logic
-
-	// 2. Submit the pointers directly - NO wrappers, NO heap allocation
-	inboxes[cpuaffinity - 1]->push_batch(tasks[0], tasks[count - 1], count);
-	return true;
-}
 bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	if (!task) return false;
 
@@ -307,7 +347,7 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	if (cpuaffinity > 0 && (size_t)(cpuaffinity - 1) < num_workers) {
 		size_t idx = (size_t)(cpuaffinity - 1);
 		if (!immediateCoresInUse[idx]->load(std::memory_order_acquire)) {
-			runningTasks.fetch_add(1, std::memory_order_relaxed);
+			pendingTasks.fetch_add(1, std::memory_order_relaxed);
 			inboxes[idx]->push(task);
 			NotifyAll();
 		}
@@ -315,7 +355,7 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 			return false;
 	}
 	else {
-		runningTasks.fetch_add(1, std::memory_order_relaxed);
+		pendingTasks.fetch_add(1, std::memory_order_relaxed);
 		uint8_t chosen = PickNextWorker();
 		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
 			chosen = PickNextWorker();
@@ -326,6 +366,20 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	}
 	return true;
 }
+bool TaskScheduler::Requeue(Task* task) {
+	if (!task) return false;
+	// Re-queue a paused task (resumed after Suspend). Unlike PushLocal this does NOT
+	// bump pendingTasks -- the task was already counted at its original submission and
+	// is only resuming, not newly created. (The yield path does the same, via the
+	// worker's push_bottom.) Otherwise every suspend->resume cycle leaks +1.
+	uint8_t chosen = PickNextWorker();
+	while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
+		chosen = PickNextWorker();
+	}
+	inboxes[chosen]->push(task);
+	workers[chosen]->NotifyWorker();
+	return true;
+}
 bool TaskScheduler::PushToCore(size_t core_id, Task* task) {
 	if (core_id < 1) return false;
 	if (!poolActive) return false;
@@ -334,8 +388,7 @@ bool TaskScheduler::PushToCore(size_t core_id, Task* task) {
 	size_t idx = (core_id - 1) % workers.size();
 	if (immediateCoresInUse[idx]->load(std::memory_order_acquire)) return false;
 
-	runningTasks.fetch_add(1, std::memory_order_relaxed);
-	immediateCoresInUse[idx]->store(true, std::memory_order_release);
+	pendingTasks.fetch_add(1, std::memory_order_relaxed);
 	workers[idx]->SetImmediateTask(task);
 	workers[idx]->NotifyWorker();
 	return true;

@@ -2,14 +2,15 @@
 #include <atomic>
 #include <thread>
 #include <vector>
-#include "Arena.h"
 #include <mutex>
+#include "Task.h"
 namespace T_Threads {
 	struct RetiredAlloc {
 		void* ptr;
 		size_t epoch;
 		void (*deleter)(void*);
 	};
+	using DeleterFunc = void(*)(void*);
 	struct LNodeBase;
 	struct LMarkableReference;
 	struct SNMarkableReference;
@@ -19,14 +20,12 @@ namespace T_Threads {
 	extern thread_local size_t thread_id;
 	inline std::atomic<size_t>  thread_counter;
 	extern thread_local std::vector<RetiredAlloc> retired;
-	extern thread_local Task* currentRunningTask;
 	class EpochManager {
 	private:
 		std::mutex retireMutex;
 		struct GlobalRetired {
 			void* ptr;        // Could be the node pointer OR the arena pointer
 			size_t epoch;
-			bool isArena;     // Flag to differentiate
 			void (*deleter)(void*);
 		};
 		std::vector<GlobalRetired> globalRetiredList;
@@ -83,14 +82,7 @@ namespace T_Threads {
 			auto it = globalRetiredList.begin();
 			while (it != globalRetiredList.end()) {
 				if (it->epoch < safeEpoch) {
-					if (it->isArena) {
-						// Cast back to Arena and clear
-						static_cast<Arena*>(it->ptr)->clear();
-					}
-					else {
-						// Call the standard node deleter
-						it->deleter(it->ptr);
-					}
+					it->deleter(it->ptr);
 					it = globalRetiredList.erase(it);
 				}
 				else {
@@ -114,25 +106,14 @@ namespace T_Threads {
 			}
 			return minEpoch;
 		}
-		/*template<typename T>
-		void RetirePtr(void* p, size_t epoch, Arena* arena) {
-			retired.push_back({ p, epoch, [](void* ptr) {
-			} });
-		}*/
-		// For individual nodes
+	
 		template<typename T>
-		void RetirePtr(T* p, size_t epoch) {
+		void RetirePtr(T* p, size_t epoch, DeleterFunc d) {
 			std::lock_guard<std::mutex> lock(retireMutex);
-			globalRetiredList.push_back({ (void*)p, epoch, false, [](void* ptr) {
-				delete static_cast<T*>(ptr);
-			} });
+			globalRetiredList.push_back({ (void*)p, epoch, d });
 		}
 
-		// For Arena blocks
-		void RetireArena(Arena* arena, size_t epoch) {
-			std::lock_guard<std::mutex> lock(retireMutex);
-			globalRetiredList.push_back({ (void*)arena, epoch, true, nullptr });
-		}
+	
 	private:
 		void AdvanceEpoch() { globalEpoch.fetch_add(1, std::memory_order_acq_rel); }
 

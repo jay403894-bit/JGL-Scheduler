@@ -10,7 +10,7 @@ add_library(T_Threads
     src/ContextSwitch.asm
     src/Epochs.cpp
     stc/Fiber.cpp
-    stc/FiberPool.cpp
+    stc/GlobalFiberPool.cpp
     src/T_Thread.cpp
     src/TaskDAG.cpp
     src/TaskScheduler.cpp 

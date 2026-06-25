@@ -3,22 +3,25 @@
 #include <atomic>
 namespace T_Threads {
     struct Fiber;
-
+    enum class FiberSize { Standard, Heavy };
     struct Task {
         using Func = void(*)(void*);
 
         Func fn;
         void* data = nullptr;
         Fiber* assignedFiber = nullptr; 
-        std::atomic<bool> stop_flag{ false };
+        std::atomic<bool> stopFlag{ false };
         std::function<void()> onComplete;
         std::atomic<bool> complete{ false };
         std::atomic<bool> callbackFlag{ false };
         std::atomic<Task*> next{ nullptr };
+		bool ownedBySlab = false; // If true, the task is allocated from the slab and should be reclaimed there
+        FiberSize requiredSize = FiberSize::Standard;
         Task() : next(nullptr), complete(false), fn(nullptr), data(nullptr), assignedFiber(nullptr) {}
-        Task(Func f, void* d = nullptr)
+        Task(Func f, void* d = nullptr, FiberSize size = FiberSize::Standard)
             : fn(f), data(d) {
         }
+        virtual ~Task() = default;
 
         inline void Execute() noexcept {
              fn(data);
@@ -37,7 +40,7 @@ namespace T_Threads {
             }
         }
         inline void Stop() {
-            stop_flag.store(true, std::memory_order_release);
+            stopFlag.store(true, std::memory_order_release);
         }
     };
 

@@ -1,32 +1,59 @@
 .code
 ContextSwitch PROC
-	; RCX = 'from' pointer, RDX = 'to' pointer
-	; Save the current context (registers) into the 'from' context
-	push rbx    ; Save the caller's RBX onto the stack
-	push rbp    ; Save the caller's RBP
-	push rdi    ; Save RDI
-	push rsi    ; Save RSI
-	push r12    ; Save R12
-	push r13    ; Save R13
-	push r14    ; Save R14
-	push r15    ; Save R15
+    ; RCX = 'from' pointer (ptr to rsp), RDX = 'to' pointer (ptr to rsp)
 
-	; save RSP into the 'from' struct
-	mov [rcx], rsp ; Save the current RSP into the 'from' struct
+    ; 1. Save Callee-Saved GPRs
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
 
-	;swap to the new RSP
-	mov rsp, [rdx] ; Update RSP to point to the 'to' struct's saved stack
+    ; 2. Save Non-Volatile XMM Registers (6 through 15)
+    ; Each XMM register is 16 bytes. Use movdqu (unaligned): after 8 pushes RSP is
+    ; 8 mod 16, not 16-aligned, so movdqa/movaps would #GP here.
+    sub rsp, 160 ; Allocate 160 bytes (10 * 16)
+    movdqu [rsp + 0], xmm6
+    movdqu [rsp + 16], xmm7
+    movdqu [rsp + 32], xmm8
+    movdqu [rsp + 48], xmm9
+    movdqu [rsp + 64], xmm10
+    movdqu [rsp + 80], xmm11
+    movdqu [rsp + 96], xmm12
+    movdqu [rsp + 112], xmm13
+    movdqu [rsp + 128], xmm14
+    movdqu [rsp + 144], xmm15
 
-	; Restore the new context (registers) from the 'to' context
-	pop r15    ; Restore R15
-	pop r14    ; Restore R14
-	pop r13    ; Restore R13
-	pop r12    ; Restore R12
-	pop rsi    ; Restore RSI
-	pop rdi    ; Restore RDI
-	pop rbp    ; Restore RBP
-	pop rbx    ; Restore RBX
+    ; 3. Swap Stack Pointers
+    mov [rcx], rsp    ; Save old RSP
+    mov rsp, [rdx]    ; Load new RSP
 
-	ret
-	ContextSwitch ENDP
-	END
+    ; 4. Restore Non-Volatile XMM Registers
+    movdqu xmm6, [rsp + 0]
+    movdqu xmm7, [rsp + 16]
+    movdqu xmm8, [rsp + 32]
+    movdqu xmm9, [rsp + 48]
+    movdqu xmm10, [rsp + 64]
+    movdqu xmm11, [rsp + 80]
+    movdqu xmm12, [rsp + 96]
+    movdqu xmm13, [rsp + 112]
+    movdqu xmm14, [rsp + 128]
+    movdqu xmm15, [rsp + 144]
+    add rsp, 160
+
+    ; 5. Restore Callee-Saved GPRs
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rbx
+
+    ret
+ContextSwitch ENDP
+END

@@ -20,17 +20,18 @@ namespace T_Threads {
         }
 
         bool Pop(T& v, size_t currentEpoch) {
+            EpochGuard guard(thread_id);
             Node* oldHead = head.load(std::memory_order_acquire);
             while (oldHead) {
                 Node* next = oldHead->next;
                 if (head.compare_exchange_weak(oldHead, next,
                     std::memory_order_acquire, std::memory_order_relaxed)) {
-
+					EpochGuard guard(thread_id);
                     v = oldHead->value;
-
-                    // Instead of delete, we RETIRE the node to the EpochManager
-                    // This ensures other threads aren't looking at this node
-                    EpochManager::Instance().RetirePtr<Node>(oldHead, currentEpoch);
+                    auto deleter = [](void* ptr) {
+                        delete static_cast<Node*>(ptr);
+                        };
+                    EpochManager::Instance().RetirePtr<Node>(oldHead, currentEpoch, deleter);
                     return true;
                 }
             }

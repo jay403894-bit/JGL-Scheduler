@@ -1,7 +1,7 @@
 #include <iostream>        
 #include <thread>         
 #include <functional>
-#include <algorithm> // Required for std::min
+#include <algorithm> 
 #include <utility>
 #include "include/T_Thread.h"
 #include "include/TaskScheduler.h"  
@@ -13,7 +13,7 @@ void forkedTask(void* data) {
     int ctr=0;
     while (true)
     {
-        if (T_Threads::current_task->stop_flag.load(std::memory_order_acquire))
+        if (T_Threads::current_task->stopFlag.load(std::memory_order_acquire))
             break;
 
         ctr = (ctr + 1) % 5;
@@ -34,6 +34,42 @@ void simpleTaskFn(void* data) {
         << " executed on thread " << std::this_thread::get_id()
         << std::endl << std::flush;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
+void YieldTest(void* data) {
+    int ctr = 0;
+    while (true) {
+        if (ctr % 3 == 0) {                   // fires every 3 iterations, not just once
+            std::cout << "YieldTest: yielding at ctr=" << ctr << std::endl;
+            T_Threads::T_Thread::CoYield();
+        }
+        ctr++;
+    }
+    
+}
+Task* suspendedTask;
+std::atomic<bool> suspendDone{ false };
+std::atomic<bool> isReadyToResume{ false };
+void SuspendTest(void* data) {
+    int ctr = 0;
+    while (true) {
+        if (ctr == 3) {
+            std::cout << "SuspendTest: Suspending control after 3 iterations." << std::endl;
+            isReadyToResume.store(true, std::memory_order_release); // Signal main!
+            T_Threads::T_Thread::Suspend();
+
+        }
+		if (ctr == 6) {
+			std::cout << "Task Resumed Exiting." << std::endl;
+            suspendDone.store(true, std::memory_order_release);
+            break;
+		}
+        ctr++;
+    }
+}
+void ResumeTest(void* data) {
+	std::cout << "ResumeTest: Resuming the suspended task." << std::endl;
+	T_Threads::T_Thread::Resume(suspendedTask->assignedFiber);
 }
 
 void fork() {
@@ -89,7 +125,6 @@ void MyWorkFunction(int start, int end) {
         sum += i;
     }
 }
-
 int main() {
     T_Threads::TaskScheduler::Init();
     auto& scheduler = T_Threads::TaskScheduler::Instance();
@@ -98,13 +133,7 @@ int main() {
     int end = 100000; 
     int chunkSize = 1000;
 
-    // You call your existing ParallelForNB directly.
-    // You pass the function pointer (or lambda) directly.
-    // Add a wait here if your scheduler doesn't block automatically
-    // or just let it finish while you debug the worker threads.
 
-
-    
     const int iterations = 10;
     const int tasksPerIteration = 100;
     int ctr = 0;
@@ -112,7 +141,7 @@ int main() {
     std::vector<Task*> tasks;
     for (int it = 0; it < iterations; ++it) {
         for (int t = 0; t < tasksPerIteration; ++t) {
-            // allocate id on heap to keep it alive for the function
+
             int* id = new int(t);
 
             Task* task = scheduler.CreateTask(simpleTaskFn, id);
@@ -130,6 +159,19 @@ int main() {
     RunDAGTest(); 
     scheduler.ParallelFor(start, end, chunkSize, MyWorkFunction);
 
+    Task* yieldTask = scheduler.CreateTask(YieldTest, nullptr);
+    scheduler.Push(yieldTask);
 
+    suspendedTask = scheduler.CreateTask(SuspendTest, nullptr);
+    scheduler.Push(suspendedTask);
+
+    T_Threads::Fiber* sf = nullptr;
+    while (!suspendDone.load(std::memory_order_acquire)) {
+        if (!sf) sf = suspendedTask->assignedFiber;
+        if (sf) T_Threads::T_Thread::Resume(sf);
+        std::this_thread::yield();
+    }
+
+    
    return 0;
 }

@@ -1,71 +1,102 @@
 #pragma once
 #include <atomic>
-#include <memory>
-#include <iostream>
+#include <type_traits>
 #include "Task.h"
 
 namespace T_Threads {
-	// T is Task*
-	template <typename T>
-	class MPSCQueue {
-	private:
-		// REMOVED struct Node entirely
+    // Intrusive multi-producer / single-consumer queue (Vyukov).
+    //
+    // T is Task*. The link is Task::next, so the queue "node" IS the Task.
+    //
+    // CRITICAL invariant: the node handed back by pop() is fully DETACHED from the
+    // queue, so the single consumer may safely destroy/Free it. We keep a dedicated,
+    // never-returned `stub_` as the sentinel. The old implementation recycled the
+    // just-popped task AS the sentinel (head_ = next), so once the worker freed that
+    // task the sentinel dangled -> pop() then read freed/recycled memory and either
+    // lost queued tasks (remaining never hits 0 -> hang) or dereferenced garbage
+    // (crash). Routing the stub through the chain instead is what makes detaching safe.
+    template <typename T>
+    class MPSCQueue {
+        static_assert(std::is_pointer<T>::value, "MPSCQueue<T> expects a pointer type");
 
-		std::atomic<T> tail_;
-		T head_; // Dummy/Sentinel Task*
+        std::atomic<Task*> head_;   // producers append here (also used by the re-pushed stub)
+        Task*              tail_;    // consumer reads here (single thread only)
+        Task*              stub_;    // persistent sentinel: never returned, never Freed by callers
 
-	public:
-		MPSCQueue() {
-			head_ = new Task(); // A dummy task
-			head_->next.store(nullptr, std::memory_order_relaxed);
-			tail_.store(head_, std::memory_order_relaxed);
-		}
+        // Append one node. Multi-producer safe; also called by the consumer to recycle
+        // the stub, which is fine -- exchange makes the consumer just one more producer.
+        void append(Task* n) {
+            n->next.store(nullptr, std::memory_order_relaxed);
+            Task* prev = head_.exchange(n, std::memory_order_acq_rel);
+            prev->next.store(n, std::memory_order_release);
+        }
 
-		~MPSCQueue() {
-			clear();
-			delete head_;
-		}
+    public:
+        MPSCQueue() {
+            stub_ = new Task();
+            stub_->next.store(nullptr, std::memory_order_relaxed);
+            head_.store(stub_, std::memory_order_relaxed);
+            tail_ = stub_;
+        }
 
-		// Push accepts Task* directly
-		void push(T task) {
-			task->next.store(nullptr, std::memory_order_relaxed);
-			T prev = tail_.exchange(task, std::memory_order_acq_rel);
-			prev->next.store(task, std::memory_order_release);
-		}
+        ~MPSCQueue() {
+            clear();
+            delete stub_;
+        }
 
-		// Batch push accepts Task* pointers
-		void push_batch(T head_batch, T tail_batch, size_t count) {
-			tail_batch->next.store(nullptr, std::memory_order_relaxed);
-			T prev = tail_.exchange(tail_batch, std::memory_order_acq_rel);
-			prev->next.store(head_batch, std::memory_order_release);
-		}
+        void push(T task) { append(task); }
 
-		bool pop(T& out_result) {
-			T head = head_;
-			T next = head->next.load(std::memory_order_acquire);
+        // Append a chain whose internal links the caller already set (head..tail).
+        void push_batch(T head_batch, T tail_batch, size_t /*count*/) {
+            tail_batch->next.store(nullptr, std::memory_order_relaxed);
+            Task* prev = head_.exchange(tail_batch, std::memory_order_acq_rel);
+            prev->next.store(head_batch, std::memory_order_release);
+        }
 
-			if (!next) {
-				if (tail_.load(std::memory_order_acquire) == head) return false;
-				while (!(next = head->next.load(std::memory_order_acquire))) {
-					std::this_thread::yield();
-				}
-			}
+        bool pop(T& out) {
+            Task* tail = tail_;
+            Task* next = tail->next.load(std::memory_order_acquire);
 
-			out_result = next;
-			head_ = next;
-			// Note: Do NOT delete head_ here if it's a Task*
-			return true;
-		}
+            if (tail == stub_) {
+                if (!next) return false;             // truly empty
+                tail_ = next;                        // step over the stub
+                tail = next;
+                next = next->next.load(std::memory_order_acquire);
+            }
 
-		void clear() {
-			T dummy;
-			while (pop(dummy)) {}
-		}
-		bool empty() const {
-			// 1. Get the current head
-			// 2. The queue is empty if head->next_ is null
-			//    AND tail_ points to the sentinel head_
-			return head_->next.load(std::memory_order_acquire) == nullptr;
-		}
-	};
-};
+            if (next) {                              // tail has a successor -> fully detached
+                tail_ = next;
+                out = static_cast<T>(tail);
+                return true;
+            }
+
+            // tail is the last node. If a producer is mid-append, retry later (no loss:
+            // tail_ has not advanced past it).
+            if (tail != head_.load(std::memory_order_acquire)) {
+                return false;
+            }
+
+            // Route the stub through so the last node gains a successor and detaches.
+            append(stub_);
+            next = tail->next.load(std::memory_order_acquire);
+            if (next) {
+                tail_ = next;
+                out = static_cast<T>(tail);
+                return true;
+            }
+            return false;
+        }
+
+        // Single-consumer only. Drains pointers without freeing them (matches old behavior).
+        void clear() {
+            T tmp;
+            while (pop(tmp)) { /* discard */ }
+        }
+
+        bool empty() const {
+            Task* tail = tail_;
+            Task* next = tail->next.load(std::memory_order_acquire);
+            return (tail == stub_ && next == nullptr);
+        }
+    };
+}

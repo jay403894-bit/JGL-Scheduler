@@ -1,9 +1,10 @@
 #include "../include/T_Thread.h"
 #include "../include/platform.h"
 #include "../include/TaskScheduler.h"
+#include <chrono>
 #include <iostream>
 using namespace T_Threads;
-thread_local T_Thread* T_Thread::self = nullptr;
+thread_local T_Thread* T_Thread::instance = nullptr;
 
 T_Thread::T_Thread(TaskScheduler& scheduler) : scheduler(&scheduler) {
 	std::memset(&schedulerCtx, 0, sizeof(Context));
@@ -15,8 +16,10 @@ void T_Thread::StartWorker(size_t cpu_affinity)
 	auto ready = std::make_shared<std::atomic<bool>>(false);
 	thread = std::thread([this, ready]() {
 		while (!ready->load(std::memory_order_acquire)) std::this_thread::yield();
-		self = this;
+		instance = this;
 		thread_id = thread_counter.fetch_add(1);
+		// Wire up the global fiber pool to this thread's cache
+		localCache.SetGlobalPool(&scheduler->GetGlobalPool());
 		this->Worker();
 		});
 	nativeHandle = thread.native_handle();
@@ -37,7 +40,6 @@ bool T_Thread::SetImmediateTask(Task* new_task) {
 	cv.notify_one();
 	return true;
 }
-T_Thread* T_Thread::GetCurrent() { return self; }
 void T_Thread::SetQueueIndex(size_t index)
 {
 	qIndex = index;
@@ -59,108 +61,106 @@ void T_Thread::Join() {
 
 	joining.store(false, std::memory_order_release);
 }
-void T_Thread::NotifyWorker()
-{
+T_Thread* T_Thread::GetCurrent() { 
+	return instance; 
+}
+
+void T_Thread::CoYield(Fiber* targetFiber){
+	if (targetFiber) {
+		targetFiber->CoYield();
+	}
+}
+void T_Thread::Suspend(Fiber* targetFiber){
+	if (targetFiber) {
+		targetFiber->Suspend();
+	}
+}
+ void T_Thread::Resume(Fiber* targetFiber) {
+	 if (targetFiber) {
+		 targetFiber->Resume(); // This pushes it into the TaskScheduler queue
+	 }
+}
+
+ void T_Threads::T_Thread::CoYield()
+ {
+	 GetCurrent()->currentFiber->CoYield();
+ }
+
+ void T_Threads::T_Thread::Suspend()
+ {
+	 GetCurrent()->currentFiber->Suspend();
+ }
+
+ uint64_t T_Thread::GenerateID() {
+	 return scheduler->nextId.fetch_add(1, std::memory_order_relaxed);
+ }
+void T_Thread::NotifyWorker(){
 	cv.notify_one();
 }
-bool T_Thread::AllQueuesEmpty() {
-	if (!localQ.empty())
-		return false;
-	if (!overflow.empty())
-		return false;
-	if (!scheduler->inboxes[qIndex]->empty())
-		return false;
-	for (const auto& q : scheduler->threadQs) {
-		if (!q->empty())
-			return false;
-	}
-	return true;
-}
-bool T_Thread::Ready()
-{
+
+bool T_Thread::Ready(){
 	return ready.load(std::memory_order_acquire);
 }
-void T_Thread::OnFinishedArena(ArenaPool* arena) {
-	size_t epoch = EpochManager::Instance().CurrentEpoch();
-	Arena* arenaToRetire = scheduler->taskArena.GetActive();
-	EpochManager::Instance().RetireArena(arenaToRetire, epoch);
-	scheduler->taskArena.Rotate();
-	EpochManager::Instance().Tick();
+       
+Fiber* T_Thread::AcquireFiber(Task* task) {
+	// 1. Try the pantry (Lock-free)
+	Fiber* f = localCache.Pop();
+	if (f) return f;
+
+	// 2. If pantry empty, we must go to the "Global Warehouse"
+	// Because your ThreadLocalCache::Pop() already calls StealBatch, 
+	// it will re-populate itself automatically.
+	f = localCache.Pop();
+
+	if (!f) {
+		std::cerr << "CRITICAL: Global pool exhausted!" << std::endl;
+	}
+	return f;
 }
-Fiber* T_Thread::AcquireFiber() {
-	// Fast path: Take from local cache (no lock!)
-	if (!localFiberCache.empty()) {
-		Fiber* f = localFiberCache.back();
-		localFiberCache.pop_back();
-		return f;
-	}
 
-	// Slow path: Lock the global pool and steal a batch
-	std::lock_guard<std::mutex> lock(scheduler->globalPoolMutex);
-	for (size_t i = 0; i < BATCH_SIZE; ++i) {
-		if (Fiber* f = scheduler->globalPool->Acquire()) {
-			localFiberCache.push_back(f);
-		}
-	}
+void T_Thread::ReleaseFiber(Fiber* f) {
+	// Simply push to the pantry. 
+	// The pantry will automatically flush to the GlobalPool if it gets too full.
+	localCache.Push(f);
+}
 
-	// Return one from the newly replenished cache
-	if (!localFiberCache.empty()) {
-		Fiber* f = localFiberCache.back();
-		localFiberCache.pop_back();
-		return f;
-	}
-	return nullptr; // Pool truly exhausted
+uint32_t T_Thread::FastRand() {
+	static thread_local uint32_t x = []() {
+		auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+		uint32_t seed = static_cast<uint32_t>(now);
+		seed ^= (std::hash<std::thread::id>{}(std::this_thread::get_id()) << 1);
+		return seed == 0 ? 1 : seed;
+		}();	
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	return x;
 }
 void T_Thread::Worker() {
 	running.store(true, std::memory_order_release);
+	const size_t BATCH_SIZE = 64;
+	Task* batch[BATCH_SIZE];
+
 	while (running.load(std::memory_order_acquire)) {
 		Task* task_to_run = nullptr;
-		{
-			ready.store(true, std::memory_order_release);
-			std::unique_lock<std::mutex> lock(workerMutex);
-			cv.wait_for(lock, std::chrono::milliseconds(1), [this]() {
-				return !running.load(std::memory_order_acquire)
-					|| immediate.load(std::memory_order_acquire)
-					|| (!scheduler->paused.load(std::memory_order_acquire) && !AllQueuesEmpty());
-				});
-
-			if (!running.load(std::memory_order_acquire)) break;
-		}
+		
+		ready.store(true, std::memory_order_release);
+		
+		
 		auto& inbox = scheduler->inboxes[qIndex];
 		auto& local_deque = scheduler->threadQs[qIndex];
-		Task* t = nullptr;
-		if (!overflow.empty()) {
-			while (local_deque->size() < local_deque->capacity() && !overflow.empty()) {
-				if (!local_deque->push_bottom(overflow.back())) {
-					break;
-				}
-				overflow.pop_back();
-			}
+
+		size_t count = 0;
+		// Collect available tasks into the local buffer
+		while (count < BATCH_SIZE && scheduler->inboxes[qIndex]->pop(batch[count])) {
+			count++;
 		}
 
-		int retries = 0;
-		const int MAX_RETRIES = 100;
-
-		while (true) {
-			if (inbox->pop(t)) {
-				retries = 0;
-
-				if (!t) {
-					std::cerr << "[worker " << qIndex << "] ERROR: popped null task\n";
-					continue;
-				}
-
-				qLoad.fetch_add(1, std::memory_order_relaxed);
-
-				while (!local_deque->push_bottom(t)) {
-					std::this_thread::yield();
-				}
-			}
-			else {
-				if (inbox->empty() && ++retries > MAX_RETRIES) {
-					break;
-				}
-				std::this_thread::yield();
+		// Use your existing push_bottom_batch for an atomic update
+		if (count > 0) {
+			if (!scheduler->threadQs[qIndex]->push_bottom_batch(batch, count)) {
+				// If deque is full, handle overflow (e.g., push back to inbox or wait)
+				std::cerr << "Local Deque full, overflow handling needed!" << std::endl;
 			}
 		}
 
@@ -205,19 +205,15 @@ void T_Thread::Worker() {
 			}
 			// --- 4. Work stealing ---
 			if (!task_to_run) {
-				size_t numThreads = scheduler->threadQs.size();
-				size_t start = rand() % numThreads;
-
-				for (size_t i = 0; i < numThreads; ++i) {
-					size_t target = (start + i) % numThreads;
-					if (target == qIndex) continue;
-
-					auto opt = scheduler->threadQs[target]->steal();
-					if (opt) {
-						task_to_run = *opt;
-						current_task = task_to_run;
-						break;
-					}
+				std::uniform_int_distribution<> dist(1, scheduler->workers.size()-1);
+				int res = FastRand() % (scheduler->workers.size() - 1);
+				while (res == qIndex) {
+					res = FastRand() % (scheduler->workers.size() - 1);
+				}
+				auto stolen = scheduler->threadQs[res]->steal();
+				if (stolen.has_value()) {
+					task_to_run = *stolen;
+					current_task = task_to_run;
 				}
 			}
 		}
@@ -226,14 +222,13 @@ void T_Thread::Worker() {
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
 			Fiber* existingFiber = task_to_run->assignedFiber;
-			bool resuming = existingFiber &&
-				existingFiber->status.load(std::memory_order_acquire) == FiberStatus::SUSPENDED;
 
 			Fiber* f;
-			if (resuming) {
-				f = existingFiber;
-			} else {
-				f = AcquireFiber();
+			if (existingFiber) {
+				f = existingFiber;      // resume existing context
+			}
+			else {
+				f = AcquireFiber(task_to_run);
 				if (!f) {
 					std::cerr << "CRITICAL: Fiber pool exhausted!" << std::endl;
 					scheduler->threadQs[qIndex]->push_bottom(task_to_run);
@@ -241,10 +236,12 @@ void T_Thread::Worker() {
 					continue;
 				}
 				task_to_run->assignedFiber = f;
-				f->Init(FiberPool::FiberEntryWrapper);
+				f->owningTask = task_to_run;
+				f->Init(GlobalFiberPool::FiberEntryWrapper);
 			}
 
 			f->status.store(FiberStatus::RUNNING, std::memory_order_release);
+			f->homeCtx = &this->schedulerCtx;   // where the fiber returns to: THIS worker
 			currentRunningTask = task_to_run;
 			currentFiber = f;
 			{
@@ -252,12 +249,34 @@ void T_Thread::Worker() {
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 			}
 
-			if (f->status.load(std::memory_order_acquire) == FiberStatus::SUSPENDED) {
+			FiberStatus fs = f->status.load(std::memory_order_acquire);
+			if (fs == FiberStatus::DEAD) {
+				// Completed for good -- reclaim the task and the fiber. Free it the same
+				// way it was allocated: slab tasks (CreateTask) go back to the slab; raw
+				// `new Task(...)` tasks are delete'd. Freeing a heap pointer into the slab
+				// poisons the free list and overflows on reuse (see Task::ownedBySlab).
+				task_to_run->assignedFiber = nullptr;
+				ReleaseFiber(f);
+				bool slab = task_to_run->ownedBySlab;
+				task_to_run->~Task();
+				if (slab)
+					scheduler->GetAllocator()->Free(task_to_run);
+				else
+					::operator delete(task_to_run);
+				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
-			} else {
-				scheduler->globalPool->Release(f);
-				task_to_run->assignedFiber = nullptr;
+			}
+			else if (fs == FiberStatus::WANTS_YIELD) {
+				// Yielded. The switch above already saved the fiber's context
+				f->status.store(FiberStatus::READY, std::memory_order_release);
+				scheduler->threadQs[qIndex]->push_bottom(task_to_run);
+				currentFiber = nullptr;
+				currentRunningTask = nullptr;
+			}
+			else {
+				// WANTS_SUSPEND: publish SUSPENDED now that the context is saved. 
+				f->status.store(FiberStatus::SUSPENDED, std::memory_order_release);
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			}
@@ -269,11 +288,18 @@ void T_Thread::Worker() {
 				is_handling_fork = false;
 			}
 
-			
-			scheduler->runningTasks.fetch_sub(1, std::memory_order_acq_rel);
-
 			if (retired.size() > 512) {
 				EpochManager::Instance().Tick();
+			}
+			{
+				std::unique_lock<std::mutex> lock(workerMutex);
+				cv.wait_for(lock, std::chrono::milliseconds(1), [this]() {
+					return !running.load(std::memory_order_acquire)
+						|| immediate.load(std::memory_order_acquire)
+						|| (!scheduler->paused.load(std::memory_order_acquire) );
+					});
+
+				if (!running.load(std::memory_order_acquire)) break;
 			}
 		}
 	}

@@ -3,11 +3,11 @@ using namespace T_Threads;
 
 TaskNode* TaskDAG::CreateNode(Task* t, uint8_t priority, uint8_t cpu_id) {
     // Allocate the node memory from the scheduler's arena
-    void* mem = scheduler.AllocateFromArena(sizeof(TaskNode));
+    void* mem = scheduler.GetAllocator()->Alloc();
     if (!mem) return nullptr;
 
     // Use placement new
-    TaskNode* node = new (mem) TaskNode(t,scheduler.GetArena());
+    TaskNode* node = new (mem) TaskNode(t);
 
     // Set properties
     node->isLocal = (priority == NONE);
@@ -35,13 +35,15 @@ void TaskDAG::SubmitIfReady(TaskNode* node) {
     }
 }
 void TaskDAG::OnTaskFinished(TaskNode* node) {
-    // Traverse the lock-free list and trigger dependents
+    // Traverse the lock-Free list and trigger dependents
     node->dependents->for_each([this](TaskNode* dep) {
         int val = dep->dependencies_left.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (val == 0) {
             SubmitToScheduler(dep);
         }
         });
+    node->~TaskNode();
+	scheduler.GetAllocator()->Free(node);
 }
 
 

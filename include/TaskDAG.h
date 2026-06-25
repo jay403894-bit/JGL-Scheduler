@@ -8,6 +8,7 @@
 #include "TaskScheduler.h"
 #include "TaskNode.h"
 #include "Epochs.h"
+#include "TaskAllocator.h"
 
 static constexpr uint8_t NONE = 255;
 

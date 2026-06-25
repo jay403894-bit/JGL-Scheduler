@@ -1,5 +1,4 @@
 #pragma once
-#include "Stack.h"
 #include "Fiber.h"
 #include "Epochs.h"
 #include "FiberStackArena.h"
@@ -16,7 +15,7 @@ namespace T_Threads {
         std::mutex freeMutex;           // guards freeList
 
     public:
-        FiberPool(int count);
+        FiberPool(int count, int size);
 
         Fiber* Acquire();
 

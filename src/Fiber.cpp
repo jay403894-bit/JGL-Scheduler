@@ -2,6 +2,7 @@
 #include "../include/T_Thread.h"
 #include "../include/TaskScheduler.h"
 using namespace T_Threads;
+std::atomic<uint64_t> T_Threads::Fiber::idGenerator{ 0 };
 void Fiber::Init(void(*entryPoint)())
 {
 	// 16-byte-align the very top of this fiber's stack.
@@ -27,38 +28,38 @@ void Fiber::Init(void(*entryPoint)())
 	*(--sp) = 0; // r12
 	*(--sp) = 0; // r13
 	*(--sp) = 0; // r14
-	*(--sp) = 0; // r15  <-- ctx.rsp; ContextSwitch starts popping here
+	*(--sp) = 0; // r15
 
-	ctx.rsp = (void*)sp;
+	// 160 bytes for non-volatile XMM6-15 (10 * 16). ContextSwitch restores these
+	// (movdqu) and then does `add rsp,160` BEFORE the pops, so this block must sit
+	// below the GPR slots and ctx.rsp must point at its base. Zero-initialized;
+	// a fresh fiber has no meaningful incoming XMM state.
+	for (int k = 0; k < 20; ++k) *(--sp) = 0; // 20 * 8 = 160 bytes
+
+	ctx.rsp = (void*)sp; // ContextSwitch loads RSP here (base of the XMM block)
 }
 
-void T_Threads::Fiber::CoYield() {
-	this->status.store(FiberStatus::READY, std::memory_order_relaxed);
-
-	// 1. Access the current thread
-	auto* thread = T_Thread::self;
-
-	// 2. Put the task back in the queue
-	TaskScheduler::Instance().Push(currentRunningTask);
-
-	// 3. Jump back to the thread's "Home Base" (schedulerCtx)
-	ContextSwitch(&this->ctx, &thread->schedulerCtx);
+void Fiber::CoYield() {
+	// Record intent and switch out. Do NOT re-queue here: the task must not become
+	// grabbable until our context is actually saved (during the switch below).
+	// Pushing first lets another worker pick up the task and resume this fiber while
+	// it's still running -- two workers, one stack. The worker re-queues us once it
+	// regains control, by which point our context is saved.
+	this->status.store(FiberStatus::WANTS_YIELD, std::memory_order_release);
+	ContextSwitch(&this->ctx, this->homeCtx);
 }
 
 void Fiber::Suspend() {
-	// The fiber knows its own task
-	Task* myTask = currentRunningTask;
-	auto thread = T_Thread::GetCurrent();
-
-	// Now perform the context switch out...
-	ContextSwitch(&this->ctx, &thread->schedulerCtx);
+	// Record intent and switch out. We must NOT publish SUSPENDED here: a racing
+	// Resume() could flip it to READY and re-queue us before the ContextSwitch below
+	// has saved our context. The worker promotes us to SUSPENDED only after we've
+	// switched out -- the first moment a resume is actually safe.
+	this->status.store(FiberStatus::WANTS_SUSPEND, std::memory_order_release);
+	ContextSwitch(&this->ctx, this->homeCtx);
 }
 void Fiber::Resume() {
-	// 1. Atomically ensure we only resume if we are truly suspended
 	FiberStatus expected = FiberStatus::SUSPENDED;
 	if (this->status.compare_exchange_strong(expected, FiberStatus::READY, std::memory_order_release)) {
-
-		// 2. Re-inject into the scheduler
-		TaskScheduler::Instance().Push(currentRunningTask);
+		TaskScheduler::Instance().Requeue(this->owningTask);  // re-queue WITHOUT re-counting
 	}
 }

@@ -2,11 +2,11 @@
 #define NOMINMAX
 #include "Task.h"
 #include "MPSCQueue.h"
-#include "Arena.h"
 #include "Epochs.h"
 #include "FiberPool.h"
 #include "TaskDeque.h"
-#include "../include/blockingconcurrentqueue.h"
+#include "TaskAllocator.h"
+#include "Stack.h"
 #include <atomic>
 #include <array>
 #include <vector>
@@ -16,6 +16,8 @@
 #include <string>
 #include <unordered_map>
 #include <thread>
+#include <immintrin.h>
+#include "GlobalFiberPool.h"
 
 namespace T_Threads {
 	class T_Thread;
@@ -23,6 +25,7 @@ namespace T_Threads {
 
 	class TaskScheduler {
 		friend class T_Thread;
+		friend class GlobalFiberPool;
 	public:
 		static TaskScheduler& Instance() {
 			if (!instance)
@@ -39,8 +42,11 @@ namespace T_Threads {
 		void ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		void ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		bool Push(Task* task);
-		bool PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity);
 		bool Push(uint8_t cpu_affinity, Task* task);
+		bool Requeue(Task* task);
+		GlobalFiberPool& GetGlobalPool();
+		// re-queue a paused (resumed) task WITHOUT counting it as new
+		void PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity=0);
 		bool PushFork(uint8_t cpu_affinity, Task* task);
 		Event& GetEvent(const std::string& name);
 		void WaitOnEvent(const std::string& eventName);
@@ -48,17 +54,21 @@ namespace T_Threads {
 		void Resume();
 		void Stop(Task* worker_task);
 		void Wait(const std::vector<Task*>& tasks);
+		TaskAllocator* GetAllocator();
 		void WaitAll();
-		Arena* GetArena();
-		void* AllocateFromArena(size_t size);
-
-		Task* CreateTask(void(*fn)(void*), void* data);
+		 
+		Task* CreateTask(void(*fn)(void*), void* data, FiberSize size = FiberSize::Standard);
 
 		template<typename F>
-		LambdaTask<F>* CreateTask(F&& f) {
-			void* mem = taskArena.GetActive()->allocate(sizeof(LambdaTask<F>));
-			if (!mem) return nullptr;
-			return new (mem) LambdaTask<F>(std::forward<F>(f));
+		auto CreateTask(F&& f) {
+			using L = LambdaTask<std::decay_t<F>>;
+			static_assert(sizeof(L) <= TaskAllocator::SLOT, "lambda too big for a slot");
+			static_assert(alignof(L) <= 16, "lambda over-aligned for the slot");
+			void* mem = taskAllocator.Alloc();
+			if (!mem) return static_cast<L*>(nullptr);
+			L* t = new (mem) L(std::forward<F>(f));
+			t->ownedBySlab = true;   // reclaimed via the slab, NOT operator delete
+			return t;
 		}
 		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
 		void Push(F&& f) {
@@ -80,25 +90,30 @@ namespace T_Threads {
 		explicit TaskScheduler(size_t poolSize);
 
 		// ---------- former SharedQueues state ----------
-		std::unique_ptr<FiberPool> globalPool;
-		std::mutex globalPoolMutex;
-		ArenaPool taskArena{ 10 * 1024 * 1024 };
-		std::atomic<int> runningTasks{ 0 };
+		std::unique_ptr<FiberPool> standardPool;
+		std::mutex standardPoolMutex;
+		std::unique_ptr<FiberPool> heavyPool;
+		std::mutex heavyPoolMutex;
+		std::atomic<uint64_t> nextId{ 0 };
+		std::atomic<int> pendingTasks{ 0 };
 		std::vector<std::unique_ptr<std::atomic<bool>>> immediateCoresInUse;
 		std::atomic<bool> paused{ false };
 		std::vector<std::unique_ptr<TaskDeque>> threadQs;
 		std::vector<std::unique_ptr<MPSCQueue<Task*>>> inboxes;
+		static GlobalFiberPool* globalPool;
 		// -----------------------------------------------
 
-		static TaskScheduler* instance;
+
+
 		static size_t GetSafeTC();
 		Task* GetTask();
 		void StartPool(size_t poolSize);
-		void RecycleArena();
-		bool PushBatchLocal(Task* tasks[], size_t count, uint8_t cpuaffinity);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToCore(size_t core_id, Task* task);
 		int PickNextWorker();
+
+		static TaskScheduler* instance;
+		TaskAllocator taskAllocator{ 1024 * 1024 }; // 1M tasks
 
 		std::unordered_map<std::string, std::unique_ptr<Event>> eventRegistry;
 		std::mutex registryMtx;
