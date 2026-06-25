@@ -15,7 +15,7 @@ namespace T_Threads {
     inline thread_local Task* current_task = nullptr;
     struct WaitHandle {
         Fiber* fiber;
-        std::atomic<bool> signaled{ false }; // Did the event occur?
+        std::atomic<bool> signaled{ false };
     };
     struct AcquireWorkRes {
         Task* task;
@@ -25,8 +25,8 @@ namespace T_Threads {
     public:
         static thread_local T_Thread* self;
 
-        Context schedulerCtx; // The "Home Base"
-        Fiber* currentFiber = nullptr; // Track the fiber active on this thread
+        Context schedulerCtx; 
+        Fiber* currentFiber = nullptr; 
         Task* currentRunningTask = nullptr;
         int qIndex = 0;
 
@@ -65,14 +65,7 @@ namespace T_Threads {
         std::vector<Fiber*> localFiberCache;
         static List<Fiber*> suspendedFibers;
         ThreadLocalCache localCache;
-        // MUST be thread_local: each worker stores itself here so GetCurrent() returns
-        // the worker running on THIS thread. Without thread_local all workers share one
-        // pointer (last writer wins) -> GetCurrent()->currentFiber is wrong/null on other
-        // threads -> FiberEntryWrapper writes self->status through null (WRITE at 0x30).
         static thread_local T_Thread* instance;
-        // Refill chunk AND (×2) the hoard cap. Keep small: numWorkers × 2×BATCH_SIZE
-        // must stay under the pool size or late workers starve on first acquire.
-        const size_t BATCH_SIZE = 4;
 
         std::atomic<bool> immediate{ false };
         std::atomic<bool> running{ false };

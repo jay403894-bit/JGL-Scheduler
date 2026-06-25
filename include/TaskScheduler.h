@@ -3,10 +3,8 @@
 #include "Task.h"
 #include "MPSCQueue.h"
 #include "Epochs.h"
-#include "FiberPool.h"
 #include "TaskDeque.h"
 #include "TaskAllocator.h"
-#include "Stack.h"
 #include <atomic>
 #include <array>
 #include <vector>
@@ -44,10 +42,9 @@ namespace T_Threads {
 		bool Push(Task* task);
 		bool Push(uint8_t cpu_affinity, Task* task);
 		bool Requeue(Task* task);
-		GlobalFiberPool& GetGlobalPool();
-		// re-queue a paused (resumed) task WITHOUT counting it as new
 		void PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity=0);
 		bool PushFork(uint8_t cpu_affinity, Task* task);
+		GlobalFiberPool& GetGlobalPool();
 		Event& GetEvent(const std::string& name);
 		void WaitOnEvent(const std::string& eventName);
 		void Pause();
@@ -90,10 +87,6 @@ namespace T_Threads {
 		explicit TaskScheduler(size_t poolSize);
 
 		// ---------- former SharedQueues state ----------
-		std::unique_ptr<FiberPool> standardPool;
-		std::mutex standardPoolMutex;
-		std::unique_ptr<FiberPool> heavyPool;
-		std::mutex heavyPoolMutex;
 		std::atomic<uint64_t> nextId{ 0 };
 		std::atomic<int> pendingTasks{ 0 };
 		std::vector<std::unique_ptr<std::atomic<bool>>> immediateCoresInUse;

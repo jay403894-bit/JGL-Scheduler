@@ -22,8 +22,6 @@ void TaskScheduler::Init(size_t poolSize) {
 	if (instance != nullptr)
 		throw std::runtime_error("TaskScheduler already initialized!");
 	instance = new TaskScheduler(poolSize);
-	// globalPool is created inside StartPool() (via the TaskScheduler ctor above)
-	// using GlobalFiberPool::Create(); GlobalFiberPool has no default ctor.
 }
 GlobalFiberPool& T_Threads::TaskScheduler::GetGlobalPool()
 {
@@ -253,7 +251,7 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			_mm_pause();
 			chosen = PickNextWorker();
 		}
-		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1], count);
+		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
 
 	}
 	else
@@ -263,7 +261,7 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			_mm_pause();
 			chosen = PickNextWorker();
 		}
-		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1], count);
+		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
 	}
 }
 

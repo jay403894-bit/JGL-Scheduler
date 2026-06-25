@@ -18,7 +18,6 @@ void T_Thread::StartWorker(size_t cpu_affinity)
 		while (!ready->load(std::memory_order_acquire)) std::this_thread::yield();
 		instance = this;
 		thread_id = thread_counter.fetch_add(1);
-		// Wire up the global fiber pool to this thread's cache
 		localCache.SetGlobalPool(&scheduler->GetGlobalPool());
 		this->Worker();
 		});
@@ -77,7 +76,7 @@ void T_Thread::Suspend(Fiber* targetFiber){
 }
  void T_Thread::Resume(Fiber* targetFiber) {
 	 if (targetFiber) {
-		 targetFiber->Resume(); // This pushes it into the TaskScheduler queue
+		 targetFiber->Resume(); 
 	 }
 }
 
@@ -103,13 +102,9 @@ bool T_Thread::Ready(){
 }
        
 Fiber* T_Thread::AcquireFiber(Task* task) {
-	// 1. Try the pantry (Lock-free)
 	Fiber* f = localCache.Pop();
 	if (f) return f;
 
-	// 2. If pantry empty, we must go to the "Global Warehouse"
-	// Because your ThreadLocalCache::Pop() already calls StealBatch, 
-	// it will re-populate itself automatically.
 	f = localCache.Pop();
 
 	if (!f) {
@@ -119,8 +114,6 @@ Fiber* T_Thread::AcquireFiber(Task* task) {
 }
 
 void T_Thread::ReleaseFiber(Fiber* f) {
-	// Simply push to the pantry. 
-	// The pantry will automatically flush to the GlobalPool if it gets too full.
 	localCache.Push(f);
 }
 
@@ -251,10 +244,7 @@ void T_Thread::Worker() {
 
 			FiberStatus fs = f->status.load(std::memory_order_acquire);
 			if (fs == FiberStatus::DEAD) {
-				// Completed for good -- reclaim the task and the fiber. Free it the same
-				// way it was allocated: slab tasks (CreateTask) go back to the slab; raw
-				// `new Task(...)` tasks are delete'd. Freeing a heap pointer into the slab
-				// poisons the free list and overflows on reuse (see Task::ownedBySlab).
+				// Completed for good 
 				task_to_run->assignedFiber = nullptr;
 				ReleaseFiber(f);
 				bool slab = task_to_run->ownedBySlab;

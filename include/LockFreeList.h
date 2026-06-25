@@ -157,8 +157,8 @@ namespace T_Threads {
 			head->next.set(tail, false);
 		}
 		~List() {
-			delete head;
-			delete tail;
+			TaskScheduler::Instance().GetAllocator()->Free(head);
+			TaskScheduler::Instance().GetAllocator()->Free(tail);
 		}
 		bool add(uint64_t key, T item) {
 			EpochManager::Instance().EnterEpoch(thread_id);

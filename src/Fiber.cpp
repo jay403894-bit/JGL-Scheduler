@@ -40,20 +40,13 @@ void Fiber::Init(void(*entryPoint)())
 }
 
 void Fiber::CoYield() {
-	// Record intent and switch out. Do NOT re-queue here: the task must not become
-	// grabbable until our context is actually saved (during the switch below).
-	// Pushing first lets another worker pick up the task and resume this fiber while
-	// it's still running -- two workers, one stack. The worker re-queues us once it
-	// regains control, by which point our context is saved.
+	// Record intent and switch out.
 	this->status.store(FiberStatus::WANTS_YIELD, std::memory_order_release);
 	ContextSwitch(&this->ctx, this->homeCtx);
 }
 
 void Fiber::Suspend() {
-	// Record intent and switch out. We must NOT publish SUSPENDED here: a racing
-	// Resume() could flip it to READY and re-queue us before the ContextSwitch below
-	// has saved our context. The worker promotes us to SUSPENDED only after we've
-	// switched out -- the first moment a resume is actually safe.
+	// Record intent and switch out. 
 	this->status.store(FiberStatus::WANTS_SUSPEND, std::memory_order_release);
 	ContextSwitch(&this->ctx, this->homeCtx);
 }

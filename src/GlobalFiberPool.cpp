@@ -76,11 +76,6 @@ void T_Threads::GlobalFiberPool::ReturnBatch(std::vector<Fiber*>& batch)
 
 void T_Threads::GlobalFiberPool::FiberEntryWrapper()
 {
-	// Capture the FIBER and TASK pointers NOW, before Execute(). These objects are
-	// stable -- they never move. Do NOT hold onto the worker (GetCurrent()): Execute()
-	// can suspend us and resume us on a DIFFERENT worker, and the original worker nulls
-	// its currentFiber field the moment we suspend. Re-reading thread->currentFiber
-	// after Execute() therefore sees nullptr -> the crash.
 	Fiber* self = T_Thread::GetCurrent()->currentFiber;
 	Task*  task = T_Thread::GetCurrent()->currentRunningTask;
 
@@ -88,12 +83,9 @@ void T_Threads::GlobalFiberPool::FiberEntryWrapper()
 		task->Execute();
 	}
 
-	// Mark DEAD before returning so the Worker knows the task completed (not suspended).
 	self->status.store(FiberStatus::DEAD, std::memory_order_release);
 
-	// Return through the fiber's OWN homeCtx -- whichever worker resumed us last stamped
-	// it right before switching in, so it always points at the worker we're actually
-	// running on now (not the stale original spawner).
+
 	ContextSwitch(&self->ctx, self->homeCtx);
 }
 

@@ -14,9 +14,15 @@ namespace T_Threads {
         bool isFork = false;
         void* mem;
         TaskNode(Task* t) : task(t), dependencies_left(0) {
-            // Allocate the LockFreeList structure itself from the Arena
-            dependents = new List<TaskNode*>();
+			void* mem =TaskScheduler::Instance().GetAllocator()->Alloc();
+            dependents = new (mem)List<TaskNode*>();
         }
-     
+        ~TaskNode() {
+            if (dependents) {
+                dependents->~List<TaskNode*>();
+
+                TaskScheduler::Instance().GetAllocator()->Free(dependents);
+            }
+         }
     };
 };
