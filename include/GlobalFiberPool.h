@@ -31,8 +31,11 @@ namespace T_Threads {
         // Bulk acquire: Take up to 'count' fibers
         std::vector<Fiber*> StealBatch(size_t count);
 
+        size_t StealInto(Fiber** dest, size_t maxCount);
+
         // Bulk release: Return a batch of fibers
-        void ReturnBatch(std::vector<Fiber*>& batch);
+        //void ReturnBatch(std::vector<Fiber*>& batch);
+        void ReturnBatch(Fiber** fibers, size_t count);
         static void FiberEntryWrapper();
 
         // Query available fiber count (for diagnostics)

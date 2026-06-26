@@ -44,6 +44,7 @@ GlobalFiberPool* GlobalFiberPool::Create(size_t standardCount, size_t heavyCount
 	return new GlobalFiberPool(standardCount, heavyCount);
 }
 
+
 std::vector<Fiber*> GlobalFiberPool::StealBatch(size_t count)
 {
 	std::vector<Fiber*> batch;
@@ -58,19 +59,27 @@ std::vector<Fiber*> GlobalFiberPool::StealBatch(size_t count)
 
 	return batch;
 }
+size_t GlobalFiberPool::StealInto(Fiber** dest, size_t maxCount) {
+	// 1. Call your existing vector-based logic
+	std::vector<Fiber*> stolen = StealBatch(maxCount);
 
-void GlobalFiberPool::ReturnBatch(std::vector<Fiber*>&batch)
-{
-	if (batch.empty()) return;
-
-	// No lock needed: MoodyCamel ConcurrentQueue handles 
-	// multiple producers enqueueing simultaneously.
-	for (Fiber* f : batch) {
-		availableFibers.enqueue(f);
+	// 2. Copy it into the provided array (stack/buffer)
+	size_t count = stolen.size();
+	for (size_t i = 0; i < count; ++i) {
+		dest[i] = stolen[i];
 	}
 
-	// Clear the local vector so the caller knows it's been emptied
-	batch.clear();
+	return count;
+}
+
+
+void GlobalFiberPool::ReturnBatch(Fiber** fibers, size_t count) {
+	if (count == 0) return;
+
+	// Direct enqueueing of the pointer batch
+	for (size_t i = 0; i < count; ++i) {
+		availableFibers.enqueue(fibers[i]);
+	}
 }
 
 void GlobalFiberPool::FiberEntryWrapper()
