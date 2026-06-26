@@ -6,25 +6,30 @@ namespace T_Threads {
     struct WaitGroup { std::atomic<int> n{ 0 }; };
 
     enum class FiberSize { Standard, Heavy };
-    struct Task {
+    struct alignas(16) Task {
         using Func = void(*)(void*);
 
         Func fn;
         void* data = nullptr;
         Fiber* assignedFiber = nullptr; 
-        std::atomic<bool> stopFlag{ false };
+        std::atomic<uint8_t> stopFlag{ false };
         std::function<void()> onComplete;
-        std::atomic<bool> complete{ false };
-        std::atomic<bool> callbackFlag{ false };
+        std::atomic<uint8_t> complete{ false };
+        std::atomic<uint8_t> callbackFlag{ false };
         std::atomic<Task*> next{ nullptr };
         WaitGroup* waitGroup = nullptr;
-		bool ownedBySlab = false; // If true, the task is allocated from the slab and should be reclaimed there
+        uint8_t ownedBySlab = false; // If true, the task is allocated from the slab and should be reclaimed there
+        uint8_t hiPri = false;
         FiberSize requiredSize = FiberSize::Standard;
         Task() : next(nullptr), complete(false), fn(nullptr), data(nullptr), assignedFiber(nullptr) {}
-        Task(Func f, void* d = nullptr, FiberSize size = FiberSize::Standard)
-            : fn(f), data(d) {
+        Task(Func f, void* d = nullptr, uint8_t hipri =false, FiberSize size = FiberSize::Standard)
+            : fn(f), data(d), hiPri(hipri), requiredSize(size) {
         }
         virtual ~Task() = default;
+        void* operator new(std::size_t) = delete;
+        void* operator new[](std::size_t) = delete;
+        void operator delete(void*) = delete;
+        void operator delete[](void*) = delete;
 
         inline void Execute() noexcept {
              fn(data);
@@ -47,7 +52,7 @@ namespace T_Threads {
     };
 
     template<typename F>
-    class LambdaTask : public Task {
+    class alignas(16) LambdaTask : public Task {
         F func;
     public:
         // Ensure we use perfect forwarding for the lambda
@@ -57,6 +62,10 @@ namespace T_Threads {
         {
             this->data = this;
         }
+        void* operator new(std::size_t) = delete;
+        void* operator new[](std::size_t) = delete;
+        void operator delete(void*) = delete;
+        void operator delete[](void*) = delete;
 
     private:
         static void ExecuteWrapper(void* ptr) {

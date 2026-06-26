@@ -113,9 +113,9 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 			pendingTasks.fetch_add(created, std::memory_order_relaxed);
 
 
-			size_t n = inboxes.size();
+			size_t n = loPriInboxes.size();
 			for (int i = 0; i < created; ++i) {
-				inboxes[i % n]->push(taskPtrs[i]);
+				loPriInboxes[i % n]->push(taskPtrs[i]);
 			}
 			NotifyAll();
 
@@ -182,19 +182,26 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	// GlobalFiberPool now owns all fibers and stack allocation
 	globalPool = GlobalFiberPool::Create(standardFiberCount, heavyFiberCount);
 	workers.clear();
-	threadQs.clear();
+	loPri.clear();
 	immediateCoresInUse.clear();
-	inboxes.clear();
+	loPriInboxes.clear();
+	hiPri.clear();
+	hiPriInboxes.clear();
 	workers.reserve(num_workers);
-	threadQs.reserve(num_workers);
+	loPri.reserve(num_workers);
+	hiPri.reserve(num_workers);
 	immediateCoresInUse.reserve(num_workers);
-	inboxes.reserve(num_workers);
+	loPriInboxes.reserve(num_workers);
+	hiPriInboxes.reserve(num_workers);
 
 	for (unsigned int i = 0; i < num_workers; ++i) {
 		immediateCoresInUse.push_back(std::make_unique<std::atomic<bool>>(false));
-		threadQs.push_back(std::make_unique<TaskDeque>());
-		inboxes.push_back(std::make_unique<TaskMPSCQueue>());
-		inboxes[i]->init(&taskAllocator);
+		loPri.push_back(std::make_unique<TaskDeque>());
+		hiPri.push_back(std::make_unique<TaskDeque>());
+		loPriInboxes.push_back(std::make_unique<TaskMPSCQueue>());
+		hiPriInboxes.push_back(std::make_unique<TaskMPSCQueue>());
+		loPriInboxes[i]->init(&taskAllocator);
+		hiPriInboxes[i]->init(&taskAllocator);
 	}
 	for (unsigned int i = 0; i < num_workers; ++i) {
 		auto worker = std::make_shared<T_Thread>(*this);
@@ -266,7 +273,7 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			_mm_pause();
 			chosen = PickNextWorker();
 		}
-		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
+		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
 
 	}
 	else
@@ -276,7 +283,7 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			_mm_pause();
 			chosen = PickNextWorker();
 		}
-		inboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
+		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
 	}
 }
 
@@ -309,11 +316,11 @@ Task* TaskScheduler::GetTask() {
 	Task* task_to_run = nullptr;
 	Task* task;
 
-	size_t numThreads = threadQs.size();
+	size_t numThreads = loPri.size();
 	size_t start = rand() % numThreads;
 	for (size_t i = 0; i < numThreads; ++i) {
 		size_t target = (start + i) % numThreads;
-		auto opt = threadQs[target]->steal();
+		auto opt = loPri[target]->steal();
 		if (opt) {
 			task_to_run = *opt;
 			current_task = task_to_run;
@@ -332,10 +339,10 @@ void TaskScheduler::WaitAll() {
 		std::this_thread::yield();
 }
 
-Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, FiberSize size) {
+Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, FiberSize size) {
 	void* mem = taskAllocator.Alloc();
 	if (!mem) return nullptr;
-	Task* t = new (mem) Task(fn, data, size);
+	Task* t = ::new (mem) Task(fn, data, hipri, size);
 	t->ownedBySlab = true;   // reclaimed via the slab on completion
 	return t;
 }
@@ -348,7 +355,7 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 		size_t idx = (size_t)(cpuaffinity - 1);
 		if (!immediateCoresInUse[idx]->load(std::memory_order_acquire)) {
 			pendingTasks.fetch_add(1, std::memory_order_relaxed);
-			inboxes[idx]->push(task);
+			loPriInboxes[idx]->push(task);
 			NotifyAll();
 		}
 		else
@@ -360,7 +367,10 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
 			chosen = PickNextWorker();
 		}
-		inboxes[chosen]->push(task);
+		if(task->hiPri)
+			hiPriInboxes[chosen]->push(task);
+		else
+			loPriInboxes[chosen]->push(task);
 		workers[chosen]->NotifyWorker();
 
 	}
@@ -376,7 +386,10 @@ bool TaskScheduler::Requeue(Task* task) {
 	while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
 		chosen = PickNextWorker();
 	}
-	inboxes[chosen]->push(task);
+	if(task->hiPri)
+		hiPriInboxes[chosen]->push(task);
+	else
+		loPriInboxes[chosen]->push(task);
 	workers[chosen]->NotifyWorker();
 	return true;
 }

@@ -62,8 +62,6 @@ namespace T_Threads {
         void Worker();
 
         TaskScheduler* scheduler;
-        std::vector<Fiber*> localFiberCache;
-        static LockFreeList<Fiber*> suspendedFibers;
         ThreadLocalCache<> localCache;
         static thread_local T_Thread* instance;
 
@@ -80,7 +78,6 @@ namespace T_Threads {
         Task* immediateTask = nullptr;
         std::thread thread;
         std::thread::native_handle_type nativeHandle;
-        std::vector<Task*> localQ;
 
     };
 };

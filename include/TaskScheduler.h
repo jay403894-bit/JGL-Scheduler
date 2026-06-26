@@ -57,17 +57,19 @@ namespace T_Threads {
 		TaskAllocator* GetAllocator();
 		void WaitAll();
 		 
-		Task* CreateTask(void(*fn)(void*), void* data, FiberSize size = FiberSize::Standard);
+		Task* CreateTask(void(*fn)(void*), void* data, uint8_t hipri = false, FiberSize size = FiberSize::Standard);
 
 		template<typename F>
-		auto CreateTask(F&& f) {
+		auto CreateTask(F&& f, uint8_t hipri = false, FiberSize size = FiberSize::Standard) {
 			using L = LambdaTask<std::decay_t<F>>;
 			static_assert(sizeof(L) <= TaskAllocator::SLOT, "lambda too big for a slot");
 			static_assert(alignof(L) <= 16, "lambda over-aligned for the slot");
 			void* mem = taskAllocator.Alloc();
 			if (!mem) return static_cast<L*>(nullptr);
-			L* t = new (mem) L(std::forward<F>(f));
+			L* t = ::new (mem) L(std::forward<F>(f));
 			t->ownedBySlab = true;   // reclaimed via the slab, NOT operator delete
+			t->hiPri = hipri;
+			t->requiredSize = size;
 			return t;
 		}
 		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
@@ -94,8 +96,10 @@ namespace T_Threads {
 		std::atomic<int> pendingTasks{ 0 };
 		std::vector<std::unique_ptr<std::atomic<bool>>> immediateCoresInUse;
 		std::atomic<bool> paused{ false };
-		std::vector<std::unique_ptr<TaskDeque>> threadQs;
-		std::vector<std::unique_ptr<TaskMPSCQueue>> inboxes;
+		std::vector<std::unique_ptr<TaskDeque>> loPri;
+		std::vector<std::unique_ptr<TaskDeque>> hiPri;
+		std::vector<std::unique_ptr<TaskMPSCQueue>> loPriInboxes;
+		std::vector<std::unique_ptr<TaskMPSCQueue>> hiPriInboxes;
 		static GlobalFiberPool* globalPool;
 		// -----------------------------------------------
 

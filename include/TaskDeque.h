@@ -8,7 +8,7 @@
 
 namespace T_Threads {
 
-    class TaskDeque {
+    class alignas(64) TaskDeque {
     public:
         explicit TaskDeque(size_t capacity = 32768)
             : capacity_(capacity),

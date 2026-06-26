@@ -147,22 +147,37 @@ void T_Thread::Worker() {
 		Task* task_to_run = nullptr;
 
 		ready.store(true, std::memory_order_release);
-
-
-		auto& inbox = scheduler->inboxes[qIndex];
-		auto& local_deque = scheduler->threadQs[qIndex];
+		auto& hiPriInbox = scheduler->hiPriInboxes[qIndex];
+		auto& hiPriQ = scheduler->hiPri[qIndex];
 
 		size_t count = 0;
 		// Collect available tasks into the local buffer
-		while (count < BATCH_SIZE && scheduler->inboxes[qIndex]->pop(batch[count])) {
+		while (count < BATCH_SIZE && scheduler->hiPriInboxes[qIndex]->pop(batch[count])) {
 			count++;
 		}
 
 		// Use your existing push_bottom_batch for an atomic update
 		if (count > 0) {
-			if (!scheduler->threadQs[qIndex]->push_bottom_batch(batch, count)) {
-				// If deque is full, handle overflow (e.g., push back to inbox or wait)
-				std::cerr << "Local Deque full, overflow handling needed!" << std::endl;
+			if (!scheduler->hiPri[qIndex]->push_bottom_batch(batch, count)) {
+				// If deque is full, handle overflow (e.g., push back to hiPriInbox or wait)
+				std::cerr << "hiPri Deque full, overflow handling needed!" << std::endl;
+			}
+		}
+
+		auto& loPriInbox = scheduler->loPriInboxes[qIndex];
+		auto& loPriQ = scheduler->loPri[qIndex];
+
+		count = 0;
+		// Collect available tasks into the local buffer
+		while (count < BATCH_SIZE && scheduler->loPriInboxes[qIndex]->pop(batch[count])) {
+			count++;
+		}
+
+		// Use your existing push_bottom_batch for an atomic update
+		if (count > 0) {
+			if (!scheduler->loPri[qIndex]->push_bottom_batch(batch, count)) {
+				// If deque is full, handle overflow (e.g., push back to loPriInbox or wait)
+				std::cerr << "loPri Deque full, overflow handling needed!" << std::endl;
 			}
 		}
 
@@ -170,13 +185,6 @@ void T_Thread::Worker() {
 		bool is_handling_fork = false;
 		{
 			if (immediateTask != nullptr) {
-				if (!localQ.empty()) {
-					while (!localQ.empty()) {
-						Task* t = localQ.back();
-						localQ.pop_back();
-						scheduler->threadQs[qIndex]->push_bottom(t);
-					}
-				}
 				task_to_run = immediateTask;
 				current_task = immediateTask;
 				immediateTask = nullptr;
@@ -185,15 +193,9 @@ void T_Thread::Worker() {
 			}
 		}
 		{
-			// --- 2. Local Worker queue of set affinity ---
-			if (!localQ.empty()) {
-				task_to_run = localQ.back();
-				localQ.pop_back();
-			}
-
-			// --- 3. Local work-stealing queue ---
+			// --- 3. Local  queues ---
 			if (!task_to_run) {
-				auto opt = scheduler->threadQs[qIndex]->pop_bottom();
+				auto opt = scheduler->hiPri[qIndex]->pop_bottom();
 				if (opt) {
 					Task* task = *opt;
 					if (!task) {
@@ -205,32 +207,53 @@ void T_Thread::Worker() {
 					}
 				}
 			}
-			// --- 4. Work stealing ---
 			if (!task_to_run) {
-				//try a local neighbor on the same logical core first
-				size_t stride = 1; // Assume 2 is the distance to a different physical core, 1 is your neighbor(hyperthread)
-				size_t neighbor = (qIndex + stride) % scheduler->workers.size();
-
-				auto stolen = scheduler->threadQs[neighbor]->steal();
-				if (stolen.has_value()) {
-					task_to_run = *stolen;
-					current_task = task_to_run;
-				}
-				else
-				{
-					//try a random neighbor second
-					int res = FastRand() % (scheduler->workers.size() - 1);
-					if (res == qIndex) res++;
-					auto stolen = scheduler->threadQs[res]->steal();
-					if (stolen.has_value()) {
-						task_to_run = *stolen;
-						current_task = task_to_run;
+				auto opt = scheduler->loPri[qIndex]->pop_bottom();
+				if (opt) {
+					Task* task = *opt;
+					if (!task) {
+						std::cerr << "[worker " << qIndex << "] Null task from pop_bottom!" << std::endl;
+					}
+					else {
+						task_to_run = task;
+						current_task = task;
 					}
 				}
 			}
 		}
+		{
+			// --- 4. Work stealing ---
+			if (!task_to_run) {
+				size_t stride = 1;
+				size_t neighbor = (qIndex + stride) % scheduler->workers.size();
 
+				// 1. Try to steal High Priority from the immediate neighbor first
+				if (auto stolen = scheduler->hiPri[neighbor]->steal()) {
+					task_to_run = *stolen;
+				}
+				// 2. If no HiPri, try to steal Low Priority from the neighbor
+				else if (auto stolen = scheduler->loPri[neighbor]->steal()) {
+					task_to_run = *stolen;
+				}
+				else {
+					// 3. Try to steal from a random worker
+					int res = FastRand() % (scheduler->workers.size() - 1);
+					if (res == qIndex) res++;
 
+					// Again: HiPri first, then LoPri
+					if (auto stolen = scheduler->hiPri[res]->steal()) {
+						task_to_run = *stolen;
+					}
+					else if (auto stolen = scheduler->loPri[res]->steal()) {
+						task_to_run = *stolen;
+					}
+				}
+
+				if (task_to_run) {
+					current_task = task_to_run;
+				}
+			}
+		}
 		// --- 6. Execute task if found ---
 		if (task_to_run) {
 			Fiber* existingFiber = task_to_run->assignedFiber;
@@ -253,7 +276,7 @@ void T_Thread::Worker() {
 						immediate.store(true, std::memory_order_release);
 					}
 					else {
-						scheduler->threadQs[qIndex]->push_bottom(task_to_run);
+						scheduler->loPri[qIndex]->push_bottom(task_to_run);
 					}
 					std::this_thread::yield();
 					continue;
@@ -290,7 +313,7 @@ void T_Thread::Worker() {
 			else if (fs == FiberStatus::WANTS_YIELD) {
 				// Yielded. The switch above already saved the fiber's context
 				f->status.store(FiberStatus::READY, std::memory_order_release);
-				scheduler->threadQs[qIndex]->push_bottom(task_to_run);
+				scheduler->loPri[qIndex]->push_bottom(task_to_run);
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			}

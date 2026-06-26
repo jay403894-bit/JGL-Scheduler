@@ -6,7 +6,7 @@
 
 namespace T_Threads {
 	//vyokov-style intrusive MPSCqueue for Task pointers
-    class TaskMPSCQueue {
+    class alignas(64)TaskMPSCQueue {
         static_assert(std::is_pointer<Task*>::value, "MPSCQueue<T> expects a pointer type");
 
         std::atomic<Task*> head_;   
@@ -26,12 +26,12 @@ namespace T_Threads {
 
         ~TaskMPSCQueue() {
             clear();
-            delete stub_;
+            ::delete stub_;
         }
 
         void init(TaskAllocator* allocator) {
             void* mem = allocator->Alloc();
-            stub_ = new (mem) Task();
+            stub_ = ::new (mem) Task();
             stub_->next.store(nullptr, std::memory_order_relaxed);
             head_.store(stub_, std::memory_order_relaxed);
             tail_ = stub_;
