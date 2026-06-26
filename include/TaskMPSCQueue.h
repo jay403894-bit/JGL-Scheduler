@@ -2,6 +2,7 @@
 #include <atomic>
 #include <type_traits>
 #include "Task.h"
+#include "TaskAllocator.h"
 
 namespace T_Threads {
 	//vyokov-style intrusive MPSCqueue for Task pointers
@@ -20,10 +21,7 @@ namespace T_Threads {
 
     public:
         TaskMPSCQueue() {
-            stub_ = new Task();
-            stub_->next.store(nullptr, std::memory_order_relaxed);
-            head_.store(stub_, std::memory_order_relaxed);
-            tail_ = stub_;
+		
         }
 
         ~TaskMPSCQueue() {
@@ -31,6 +29,13 @@ namespace T_Threads {
             delete stub_;
         }
 
+        void init(TaskAllocator* allocator) {
+            void* mem = allocator->Alloc();
+            stub_ = new (mem) Task();
+            stub_->next.store(nullptr, std::memory_order_relaxed);
+            head_.store(stub_, std::memory_order_relaxed);
+            tail_ = stub_;
+        }
         void push(Task* task) { append(task); }
 
         void push_batch(Task*head_batch, Task*tail_batch) {

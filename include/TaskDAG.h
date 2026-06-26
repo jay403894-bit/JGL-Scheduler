@@ -26,6 +26,8 @@ namespace T_Threads {
         // graph has a cycle (some node's dependencies_left can never reach 0).
         bool HasCycle();
 
+        void Validate();
+
         // Validate then kick off the whole graph. Returns false (and reclaims the nodes)
         // if there's a cycle; otherwise submits all roots and returns true. This is the
         // intended entry point -- prefer it over calling SubmitIfReady per root, because

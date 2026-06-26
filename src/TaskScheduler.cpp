@@ -81,80 +81,65 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 	chunkSize = std::max(1, chunkSize);
 	int totalItems = end - start;
 	if (totalItems <= 0) return;
+	if (totalItems > 10000) {
+		int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
-	int numTasks = (totalItems + chunkSize - 1) / chunkSize;
+		// Holds only the tasks we successfully allocated.
+		Task** taskPtrs = new Task * [numTasks];
+		int created = 0;
 
-	// Holds only the tasks we successfully allocated.
-	Task** taskPtrs = new Task * [numTasks];
-	int created = 0;
+		std::atomic<int> remaining{ 0 };
 
-	// Completion is tracked by this STACK-LOCAL counter -- NOT by polling the Task
-	// objects. A worker destroys+frees each Task the instant its fiber goes DEAD
-	// (T_Thread::Worker, the FiberStatus::DEAD branch), so the old code's
-	// `taskPtrs[i]->complete` poll was a use-after-free: it read a slab slot that had
-	// already been freed and frequently recycled into a brand-new Task (complete==false
-	// again) -> spin forever (hang) or read unmapped memory (crash). This counter lives
-	// on our stack frame, which outlives every chunk because we block below until it
-	// hits zero. Each chunk decrements it as the LAST thing inside Execute(), before the
-	// worker is allowed to free the Task. `remaining` and `func` are captured by
-	// reference -- safe precisely because we don't return until remaining == 0.
-	std::atomic<int> remaining{ 0 };
+		// 1. Create tasks. If the arena is exhausted (CreateTask returns nullptr),
+		//    run that chunk inline on the caller rather than dereferencing null.
+		for (int i = 0; i < numTasks; ++i) {
+			int chunkStart = start + i * chunkSize;
+			int chunkEnd = std::min(chunkStart + chunkSize, end);
 
-	// 1. Create tasks. If the arena is exhausted (CreateTask returns nullptr),
-	//    run that chunk inline on the caller rather than dereferencing null.
-	for (int i = 0; i < numTasks; ++i) {
-		int chunkStart = start + i * chunkSize;
-		int chunkEnd = std::min(chunkStart + chunkSize, end);
-
-		Task* t = CreateTask([&remaining, &func, chunkStart, chunkEnd]() {
-			func(chunkStart, chunkEnd);
-			remaining.fetch_sub(1, std::memory_order_acq_rel);
-		});
-		if (!t) {
-			func(chunkStart, chunkEnd); // graceful degradation: do it here (no counter touch)
-			continue;
-		}
-		// Count it BEFORE it can possibly run (we push only after this loop).
-		remaining.fetch_add(1, std::memory_order_relaxed);
-		taskPtrs[created++] = t;
-	}
-
-	if (created > 0) {
-		pendingTasks.fetch_add(created, std::memory_order_relaxed);
-
-		// 2. Distribute across all workers' inboxes (round-robin). Dumping the
-		//    whole batch on one worker pins it in the inbox->deque drain loop and
-		//    hangs when created > deque capacity (large range / small chunkSize)
-		//    or when there's only one worker. (push handles the next-link itself.)
-		//    After this loop we never touch taskPtrs[i] again -- a worker may have
-		//    already freed it.
-		size_t n = inboxes.size();
-		for (int i = 0; i < created; ++i) {
-			inboxes[i % n]->push(taskPtrs[i]);
-		}
-		NotifyAll();
-
-		// 3. Wait on the counter, HELPING while we wait so the calling thread makes
-		//    progress too. Pure spinning deadlocks when ParallelFor runs on a worker
-		//    fiber (nested) or when there's only one worker. GetTask() steals a task
-		//    out of a deque -- removed exactly once -- so running it here can't
-		//    double-execute; we decrement pendingTasks because the owning worker will
-		//    never see it. (A helped chunk still decrements `remaining` from inside
-		//    its own Execute(), so the wait terminates regardless of who runs it.)
-		while (remaining.load(std::memory_order_acquire) > 0) {
-			Task* helped = GetTask();
-			if (helped) {
-				helped->Execute();
-				pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+			Task* t = CreateTask([&remaining, &func, chunkStart, chunkEnd]() {
+				func(chunkStart, chunkEnd);
+				remaining.fetch_sub(1, std::memory_order_acq_rel);
+				});
+			if (!t) {
+				func(chunkStart, chunkEnd); // graceful degradation: do it here (no counter touch)
+				continue;
 			}
-			else {
-				std::this_thread::yield();
+			// Count it BEFORE it can possibly run (we push only after this loop).
+			remaining.fetch_add(1, std::memory_order_relaxed);
+			taskPtrs[created++] = t;
+		}
+
+		if (created > 0) {
+			pendingTasks.fetch_add(created, std::memory_order_relaxed);
+
+
+			size_t n = inboxes.size();
+			for (int i = 0; i < created; ++i) {
+				inboxes[i % n]->push(taskPtrs[i]);
+			}
+			NotifyAll();
+
+			while (remaining.load(std::memory_order_acquire) > 0) {
+				Task* helped = GetTask();
+				if (helped) {
+					helped->Execute();
+					pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+				}
+				else {
+					std::this_thread::yield();
+				}
 			}
 		}
+
+		delete[] taskPtrs;
 	}
-
-	delete[] taskPtrs;
-
+	else
+	{
+		for (int i = start; i < end; i++)
+		{
+			func(i, i + 1);
+		}
+	}
 	// 4. Batch is done and no longer referenced by us. Recycle the arena it
 	//    came from — but only if the whole system is quiescent (see RecycleArena).
 	//RecycleArena();
@@ -186,7 +171,6 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	EpochManager::Instance().Init(num_workers + 1);
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
-
 	unsigned int coreCount = std::thread::hardware_concurrency()-1;
 	if (coreCount == 0) coreCount = 4; // Fallback
 
@@ -210,6 +194,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 		immediateCoresInUse.push_back(std::make_unique<std::atomic<bool>>(false));
 		threadQs.push_back(std::make_unique<TaskDeque>());
 		inboxes.push_back(std::make_unique<TaskMPSCQueue>());
+		inboxes[i]->init(&taskAllocator);
 	}
 	for (unsigned int i = 0; i < num_workers; ++i) {
 		auto worker = std::make_shared<T_Thread>(*this);
