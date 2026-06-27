@@ -337,7 +337,7 @@ void T_Thread::Worker() {
 				is_handling_fork = false;
 			}
 
-			if (retired.size() > 512) {
+			if (EpochManager::Instance().RetiredCount() > 512) {
 				EpochManager::Instance().Tick();
 			}
 			{

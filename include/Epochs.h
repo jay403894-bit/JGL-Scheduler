@@ -4,15 +4,11 @@
 #include <vector>
 #include <mutex>
 #include "Task.h"
+#include "concurrentqueue.h"
 
 namespace T_Threads {
 	struct EpochParticipant {
 		std::atomic<size_t> localEpoch{ SIZE_MAX };
-	};
-	struct RetiredAlloc {
-		void* ptr;
-		size_t epoch;
-		void (*deleter)(void*);
 	};
 	using DeleterFunc = void(*)(void*);
 	struct LNodeBase;
@@ -23,18 +19,22 @@ namespace T_Threads {
 	struct PeriodicTask;
 	extern thread_local size_t thread_id;
 	inline std::atomic<size_t>  thread_counter;
-	extern thread_local std::vector<RetiredAlloc> retired;
 	class EpochManager {
 	private:
-		std::mutex retireMutex;
 		std::vector<std::atomic<size_t>*> participants;
-		std::mutex participantMutex;
+	//	std::mutex participantMutex;
 		struct GlobalRetired {
-			void* ptr;        // Could be the node pointer OR the arena pointer
-			size_t epoch;
+			void* ptr;        // node/arena pointer to free once safe
+			size_t epoch;     // epoch at which it was retired
 			void (*deleter)(void*);
 		};
-		std::vector<GlobalRetired> globalRetiredList;
+		// Producers (RetirePtr, i.e. a list remove) enqueue here LOCK-FREE.
+		moodycamel::ConcurrentQueue<GlobalRetired> incoming;
+		// Owned exclusively by the single active reclaimer (gated by `reclaiming`): holds
+		// drained entries not yet safe to free. No lock needed -- only one thread touches it.
+		std::vector<GlobalRetired> pending;
+		std::atomic<bool>   reclaiming{ false };   // only one reclaimer at a time
+		std::atomic<size_t> retiredCount{ 0 };     // approx live retired count; drives self-reclaim
 
 		std::atomic<size_t> globalEpoch{ 0 };
 
@@ -54,7 +54,7 @@ namespace T_Threads {
 		}
 		// Simply pass the address of the member that already exists in your Task
 		void RegisterParticipant(std::atomic<size_t>* slot) {
-			std::lock_guard<std::mutex> lock(participantMutex);
+		//	std::lock_guard<std::mutex> lock(participantMutex);
 			participants.push_back(slot);
 		}
 
@@ -89,39 +89,52 @@ namespace T_Threads {
 		std::atomic<size_t>* ThreadSlot(size_t tid) {
 			return &threadEpochs[tid]->localEpoch;
 		}
-		void Reclaim(size_t safeEpoch) {
-			auto it = retired.begin();
-			while (it != retired.end()) {
-				if (it->epoch < safeEpoch) {
-					it->deleter(it->ptr);
-					it = retired.erase(it);
-				}
-				else {
-					++it;
-				}
-			}
-		}
 		void TryReclaim() {
-			size_t safeEpoch = MinActiveEpoch();
+			// One reclaimer at a time. Others bail -- reclaim is cold and idempotent. This
+			// makes the reclaimer effectively single-threaded, so `pending` needs no lock
+			// even though RetirePtr runs concurrently (it only touches `incoming`).
+			bool expected = false;
+			if (!reclaiming.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+				return;
 
-			std::lock_guard<std::mutex> lock(retireMutex);
-			auto it = globalRetiredList.begin();
-			while (it != globalRetiredList.end()) {
-				if (it->epoch < safeEpoch) {
-					it->deleter(it->ptr);
-					it = globalRetiredList.erase(it);
-				}
-				else {
-					++it;
+			// 1. Drain what producers enqueued into our private list.
+			GlobalRetired item;
+			while (incoming.try_dequeue(item))
+				pending.push_back(item);
+
+			// 2. Free what's now safe; compact survivors to the front. EBR keeps entries
+			//    whose epoch >= safeEpoch -- a reader may still be able to reach them.
+			size_t safeEpoch = MinActiveEpoch();
+			size_t kept = 0, freed = 0;
+			for (size_t i = 0; i < pending.size(); ++i) {
+				if (pending[i].epoch < safeEpoch) {
+					pending[i].deleter(pending[i].ptr);
+					++freed;
+				} else {
+					pending[kept++] = pending[i];
 				}
 			}
+			pending.resize(kept);
+			if (freed) retiredCount.fetch_sub(freed, std::memory_order_relaxed);
+
+			reclaiming.store(false, std::memory_order_release);
 		}
+		// Approximate count of pointers awaiting reclamation. Workers poll this to
+		// self-trigger Tick() under load, so reclamation no longer depends solely on an
+		// external (engine) Tick() call.
+		size_t RetiredCount() const { return retiredCount.load(std::memory_order_relaxed); }
 		size_t CurrentEpoch() { return globalEpoch.load(std::memory_order_acquire); }
 		size_t MinActiveEpoch() {
 			size_t minEpoch = globalEpoch.load(std::memory_order_acquire);
 			// Scan the participants union (all fiber slots + all thread fallback slots).
 			// Registration only happens at setup, so this never races a freed slot.
-			std::lock_guard<std::mutex> lock(participantMutex);
+		
+			// participants is built once during StartPool (single-threaded) and frozen before any
+			// worker runs; thread-creation publishes it. Hence MinActiveEpoch reads it WITHOUT a lock.
+			// If you ever add runtime (un)registration, this read becomes a data race -- re-add a lock.
+			
+			//	std::lock_guard<std::mutex> lock(participantMutex);
+			
 			for (auto* slot : participants) {
 				size_t e = slot->load(std::memory_order_acquire);
 				if (e != SIZE_MAX && e < minEpoch) minEpoch = e;
@@ -131,8 +144,8 @@ namespace T_Threads {
 	
 		template<typename T>
 		void RetirePtr(T* p, size_t epoch, DeleterFunc d) {
-			std::lock_guard<std::mutex> lock(retireMutex);
-			globalRetiredList.push_back({ (void*)p, epoch, d });
+			incoming.enqueue(GlobalRetired{ (void*)p, epoch, d });   // lock-free
+			retiredCount.fetch_add(1, std::memory_order_relaxed);
 		}
 
 	
