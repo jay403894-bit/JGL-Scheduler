@@ -67,8 +67,7 @@ namespace T_Threads {
 			void* mem = taskAllocator.Alloc();
 			if (!mem) return static_cast<L*>(nullptr);
 			L* t = ::new (mem) L(std::forward<F>(f));
-			t->ownedBySlab = true;   // reclaimed via the slab, NOT operator delete
-			t->hiPri = hipri;
+ 			t->hiPri = hipri;
 			t->requiredSize = size;
 			return t;
 		}

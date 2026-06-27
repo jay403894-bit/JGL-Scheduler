@@ -15,12 +15,21 @@ static constexpr uint8_t NONE = 255;
 namespace T_Threads {
 
     class TaskDAG {
+        struct TaskFinishedContext {
+            TaskDAG* parent;
+            TaskNode* node;
+        };
     public:
         TaskDAG(TaskScheduler& sched) : scheduler(sched) {};
         TaskNode* CreateNode(Task* t, uint8_t priority = NONE, uint8_t cpu_id = NONE);
          void AddDependency(TaskNode* dependent, TaskNode* dependency);
 
-
+         static void OnTaskFinishedWrapper(void* data) {
+             // You have to cast the void* back to whatever struct contains your context
+             auto* context = static_cast<TaskFinishedContext*>(data);
+             context->parent->OnTaskFinished(context->node);
+             delete context; // Cleanup
+         }
         // Offline cycle check (Kahn's). MUST be called before any node is submitted --
         // it walks every tracked node, which self-free once running. Returns true if the
         // graph has a cycle (some node's dependencies_left can never reach 0).

@@ -20,6 +20,11 @@ GlobalFiberPool::GlobalFiberPool(size_t standardCount, size_t heavyCount)
 		f.stackBase = stackMem;
 		f.stackSize = 64 * 1024;
 
+		// Register this fiber's EBR slot ONCE. Fibers live for the whole program (the
+		// pool is leaked, the vector is reserve()'d so it never reallocates), so the
+		// slot address is stable and never needs unregistering -- no lifetime trap.
+		EpochManager::Instance().RegisterParticipant(&f.localEpoch);
+
 		// Push into the lock-free queue instead of a vector
 		availableFibers.enqueue(&f);
 	}
@@ -34,6 +39,8 @@ GlobalFiberPool::GlobalFiberPool(size_t standardCount, size_t heavyCount)
 		Fiber& f = heavyFibers.back();
 		f.stackBase = stackMem;
 		f.stackSize = 512 * 1024;
+
+		EpochManager::Instance().RegisterParticipant(&f.localEpoch);  // see standard loop
 
 		// Push into the lock-free queue
 		availableFibers.enqueue(&f);

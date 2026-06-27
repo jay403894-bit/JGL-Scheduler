@@ -8,7 +8,21 @@
 #include <cstdint>
 #include "Epochs.h"
 #include "TaskAllocator.h"
+#include "T_Thread.h"
+#include "Fiber.h"
+
 namespace T_Threads {
+	// Epoch slot for the current execution context: the running fiber's slot if we're on
+	// one, else this (bare) thread's fallback slot. The fiber branch is migration-proof --
+	// the slot travels with the fiber across a context switch. Bare threads (e.g. the main
+	// thread building a DAG) don't migrate, so their per-thread fallback is correct.
+	inline std::atomic<size_t>* CurrentEpochSlot() {
+		if (T_Thread* w = T_Thread::GetCurrent())
+			if (Fiber* f = w->currentFiber)
+				return &f->localEpoch;
+		return EpochManager::Instance().ThreadSlot(thread_id);
+	}
+
 	struct LNodeBase; // forward declaration
 
 	// MarkableReference stores a Node* and a bool mark
@@ -162,35 +176,32 @@ namespace T_Threads {
 			allocator.Free(tail);
 		}
 		bool add(uint64_t key, T item) {
-			EpochManager::Instance().EnterEpoch(thread_id);
+			EpochGuard guard(CurrentEpochSlot());   // RAII: leaves on every return path
 			while (true) {
 				Window window = Window::find(head, key);
 				LNode<T>* pred = static_cast<LNode<T>*>(window.pred);
 				LNode<T>* curr = static_cast<LNode<T>*>(window.curr);
 
 				if (curr->key == key) {
-					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return false;
 				}
-				void* mem =allocator.Alloc();
+				void* mem = allocator.Alloc();
 				LNode<T>* node = new (mem) LNode<T>(key, item);
 				node->next.set(curr, false);
 
 				if (pred->next.compareAndSet(curr, node, false, false)) {
-					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return true;
 				}
 			}
 		}
 		bool remove(uint64_t key) {
-			EpochManager::Instance().EnterEpoch(thread_id); // enter epoch
+			EpochGuard guard(CurrentEpochSlot());   // RAII: leaves on every return path
 			bool snip = false;
 			while (true) {
 				Window window = Window::find(head, key);
 				LNode<T>* pred = static_cast<LNode<T>*>(window.pred);
 				LNode<T>* curr = static_cast<LNode<T>*>(window.curr);
 				if (curr->key != key) {
-					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
 					return false;
 				}
 				else {
@@ -203,15 +214,15 @@ namespace T_Threads {
 						curr,
 						EpochManager::Instance().CurrentEpoch(),
 						&LockFreeList<T>::slabDeleter
-					);					
-					EpochManager::Instance().LeaveEpoch(thread_id); // leave epoch
+					);
 					return true;
 				}
 			}
 		}
 		template <typename F>
 		void for_each(F func) {
-			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
+
+			EpochGuard guard(CurrentEpochSlot());  // Ensure we are in an epoch for safe traversal
 			// Start after the sentinel head
 			LNodeBase* curr = head->next.getReference();
 
@@ -229,7 +240,7 @@ namespace T_Threads {
 			}
 		}
 		bool contains(uint64_t key) {
-			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
+			EpochGuard guard(CurrentEpochSlot());  // Ensure we are in an epoch for safe traversal
 			LNodeBase* curr = head;
 
 			while (curr != nullptr) {
@@ -245,7 +256,7 @@ namespace T_Threads {
 			return false;
 		}
 		T* get(uint64_t key) {
-			EpochGuard guard(thread_id);  // Ensure we are in an epoch for safe traversal
+			EpochGuard guard(CurrentEpochSlot());  // Ensure we are in an epoch for safe traversal
 			bool marked = false;
 			LNodeBase* curr = head;
 

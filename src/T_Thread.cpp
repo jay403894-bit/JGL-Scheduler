@@ -291,7 +291,6 @@ void T_Thread::Worker() {
 			currentRunningTask = task_to_run;
 			currentFiber = f;
 			{
-				EpochGuard guard(thread_id);
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 			}
 
@@ -300,12 +299,8 @@ void T_Thread::Worker() {
 				// Completed for good 
 				task_to_run->assignedFiber = nullptr;
 				ReleaseFiber(f);
-				bool slab = task_to_run->ownedBySlab;
 				task_to_run->~Task();
-				if (slab)
-					scheduler->GetAllocator()->Free(task_to_run);
-				else
-					::operator delete(task_to_run);
+				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;

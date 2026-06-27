@@ -11,7 +11,7 @@ using T_Threads::Task;
 using T_Threads::TaskScheduler;
 
 void forkedTask(void* data) {
-    int ctr=0;
+    int ctr = 0;
     while (true)
     {
         if (T_Threads::current_task->stopFlag.load(std::memory_order_acquire))
@@ -22,7 +22,7 @@ void forkedTask(void* data) {
         TaskScheduler::Instance().Push(ctr, [ctr]() {
             std::cout << "ctr: " << ctr << std::endl;
             });
-  
+
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -46,7 +46,7 @@ void YieldTest(void* data) {
         }
         ctr++;
     }
-    
+
 }
 Task* suspendedTask;
 std::atomic<bool> suspendDone{ false };
@@ -60,31 +60,30 @@ void SuspendTest(void* data) {
             T_Threads::T_Thread::Suspend();
 
         }
-		if (ctr == 6) {
-			std::cout << "Task Resumed Exiting." << std::endl;
+        if (ctr == 6) {
+            std::cout << "Task Resumed Exiting." << std::endl;
             suspendDone.store(true, std::memory_order_release);
             break;
-		}
+        }
         ctr++;
     }
 }
 void ResumeTest(void* data) {
-	std::cout << "ResumeTest: Resuming the suspended task." << std::endl;
-	T_Threads::T_Thread::Resume(suspendedTask->assignedFiber);
+    std::cout << "ResumeTest: Resuming the suspended task." << std::endl;
+    T_Threads::T_Thread::Resume(suspendedTask->assignedFiber);
 }
 
 void fork() {
     TaskScheduler& scheduler = TaskScheduler::Instance();
 
-    Task* forkt = new Task(forkedTask, nullptr);
-
-
-    scheduler.PushFork(3,forkt);
+    Task* forkt = scheduler.CreateTask(forkedTask, nullptr);
+    T_Threads::WaitGroup wg;
+    forkt->waitGroup = &wg;
+    wg.n.fetch_add(1, std::memory_order_relaxed);
+    scheduler.PushFork(3, forkt);
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     forkt->Stop();
-    while (!forkt->complete.load()) {
-        std::this_thread::yield();
-    }
+    scheduler.WaitFor(wg);
 }
 void RunDAGTest() {
     using namespace T_Threads;
@@ -93,11 +92,11 @@ void RunDAGTest() {
     std::atomic<int> counter{ 0 };
 
     // 1. Create Nodes using the DAG factory
-    TaskNode* nodeA = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task A finished\n"; counter++; }));
-    TaskNode* nodeB = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task B finished\n"; counter++; }));
-    TaskNode* nodeC = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task C finished\n"; counter++; }));
-    TaskNode* nodeD = dag.CreateNode(new LambdaTask([&]() { std::cout << "Task D finished (Target reached!)\n"; counter++; }));
-   
+    TaskNode* nodeA = dag.CreateNode(sched.CreateTask([&]() { std::cout << "Task A finished\n"; counter++; }));
+    TaskNode* nodeB = dag.CreateNode(sched.CreateTask([&]() { std::cout << "Task B finished\n"; counter++; }));
+    TaskNode* nodeC = dag.CreateNode(sched.CreateTask([&]() { std::cout << "Task C finished\n"; counter++; }));
+    TaskNode* nodeD = dag.CreateNode(sched.CreateTask([&]() { std::cout << "Task D finished (Target reached!)\n"; counter++; }));
+
     // 2. Setup Dependencies
     dag.AddDependency(nodeB, nodeA);
     dag.AddDependency(nodeC, nodeA);
@@ -106,7 +105,7 @@ void RunDAGTest() {
 
     // 3. Start DAG
     std::cout << "Starting DAG...\n";
-    dag.SubmitIfReady(nodeA);
+    dag.Submit();
 
     // 4. Wait
     while (counter < 4) {
@@ -131,7 +130,7 @@ int main() {
     auto& scheduler = T_Threads::TaskScheduler::Instance();
 
     int start = 0;
-    int end = 100000; 
+    int end = 100000;
     int chunkSize = 1000;
 
 
@@ -149,17 +148,17 @@ int main() {
             Task* task = scheduler.CreateTask(simpleTaskFn, id);
             task->waitGroup = &wg;
             scheduler.Push(task);
-			wg.n.fetch_add(1, std::memory_order_relaxed);
+            wg.n.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
         std::this_thread::yield();
-    }    
+    }
     std::cout << "Stress test completed." << std::endl;
     fork();
 
 
     scheduler.WaitFor(wg);
-    RunDAGTest(); 
+    RunDAGTest();
     scheduler.ParallelFor(start, end, chunkSize, MyWorkFunction);
 
     Task* yieldTask = scheduler.CreateTask(YieldTest, nullptr);
@@ -175,6 +174,6 @@ int main() {
         std::this_thread::yield();
     }
 
-    
-   return 0;
+
+    return 0;
 }

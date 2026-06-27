@@ -353,7 +353,6 @@ Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, Fib
 	void* mem = taskAllocator.Alloc();
 	if (!mem) return nullptr;
 	Task* t = ::new (mem) Task(fn, data, hipri, size);
-	t->ownedBySlab = true;   // reclaimed via the slab on completion
 	return t;
 }
 

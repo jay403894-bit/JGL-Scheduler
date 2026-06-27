@@ -51,10 +51,8 @@ bool TaskDAG::Submit() {
             n->~TaskNode();
             scheduler.GetAllocator()->Free(n);
             if (t) {
-                bool slab = t->ownedBySlab;
                 t->~Task();
-                if (slab) scheduler.GetAllocator()->Free(t);
-                else      ::operator delete(t);
+                scheduler.GetAllocator()->Free(t);
             }
         }
         nodes.clear();
@@ -99,9 +97,9 @@ void TaskDAG::SubmitToScheduler(TaskNode* node) {
     if (node->submitted.exchange(true, std::memory_order_acq_rel)) {
         return; // Already submitted by another thread, do nothing!
     }
-    node->task->onComplete = [node, this]() {
-        this->OnTaskFinished(node);
-        };
+    auto* ctx = new TaskFinishedContext{ this, node };
+    node->task->onComplete = &OnTaskFinishedWrapper;
+    node->task->onCompleteData = ctx;
 
     if (node->isFork) {
         scheduler.PushFork(node->cpuID, node->task);

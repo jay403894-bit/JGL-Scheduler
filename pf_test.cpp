@@ -7,10 +7,13 @@
 #include <dbghelp.h>
 #include "include/TaskScheduler.h"
 #include "include/Event.h"
+#include "include/TaskDAG.h"
 #include <atomic>
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <cmath>
+#include <algorithm>
 #include <cstdio>
 #pragma comment(lib, "dbghelp.lib")
 
@@ -87,6 +90,101 @@ int main(int argc, char** argv) {
             if ((round % 50) == 0) { printf("[e] round %d ok\n", round); fflush(stdout); }
         }
         printf("EVENT_TEST_OK rounds=%d\n", ROUNDS);
+        return 0;
+    }
+
+    if (mode == 'D') {
+        // DAG / cycle detection. Objects are leaked on purpose: a node's onComplete
+        // captures `this` (the dag), so destroying the dag while a worker is still in
+        // OnTaskFinished would be a UAF -- leaking sidesteps that in this short test.
+
+        // 1) Valid diamond: A->B, A->C, B->D, C->D. HasCycle() false; all 4 run once.
+        {
+            auto* dag = new TaskDAG(s);
+            auto* ran = new std::atomic<int>(0);
+            auto mk = [&] { return dag->CreateNode(s.CreateTask([ran] { ran->fetch_add(1, std::memory_order_relaxed); })); };
+            TaskNode* A = mk(), * B = mk(), * C = mk(), * D = mk();
+            dag->AddDependency(B, A);
+            dag->AddDependency(C, A);
+            dag->AddDependency(D, B);
+            dag->AddDependency(D, C);
+            if (dag->HasCycle()) { fprintf(stderr, "DAG: false-positive cycle on valid diamond\n"); return 4; }
+            if (!dag->Submit()) { fprintf(stderr, "DAG: Submit rejected a valid diamond\n"); return 4; }
+            auto t0 = std::chrono::steady_clock::now();
+            while (ran->load(std::memory_order_acquire) < 4) {
+                std::this_thread::yield();
+                if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(10)) {
+                    fprintf(stderr, "DAG: diamond hung, ran=%d/4\n", ran->load()); return 4;
+                }
+            }
+            printf("[d] diamond ran all 4 ok\n");
+        }
+
+        // 2) Cycle: A->B->C->A. HasCycle() true; Submit() must reject and not run/hang.
+        {
+            auto* dag = new TaskDAG(s);
+            auto* ran = new std::atomic<int>(0);
+            auto mk = [&] { return dag->CreateNode(s.CreateTask([ran] { ran->fetch_add(1, std::memory_order_relaxed); })); };
+            TaskNode* A = mk(), * B = mk(), * C = mk();
+            dag->AddDependency(B, A);
+            dag->AddDependency(C, B);
+            dag->AddDependency(A, C);   // closes the cycle
+            if (!dag->HasCycle()) { fprintf(stderr, "DAG: cycle NOT detected\n"); return 4; }
+            if (dag->Submit()) { fprintf(stderr, "DAG: Submit accepted a cyclic graph\n"); return 4; }
+            if (ran->load() != 0) { fprintf(stderr, "DAG: cyclic task ran (%d)\n", ran->load()); return 4; }
+            printf("[d] cycle detected + rejected ok\n");
+        }
+
+        printf("DAG_TEST_OK\n");
+        return 0;
+    }
+
+    if (mode == 'P') {
+        // Benchmark: same sqrt workload, serial loop vs ParallelFor, across sizes.
+        // Reports the MEDIAN of many reps (robust to scheduling jitter), in microseconds.
+        unsigned hw = std::thread::hardware_concurrency();
+        int workers = (hw > 1) ? (int)hw - 1 : 1;
+        printf("workers=%d   (median of 101 reps, microseconds)\n", workers);
+        printf("%-12s %-14s %-14s %-10s\n", "N", "serial(us)", "parallel(us)", "speedup");
+
+        const int sizes[] = { 1000, 10000, 100000, 1000000, 4000000 };
+        const int REPS = 101;
+        volatile long long ssink = 0;
+
+        for (int N : sizes) {
+            int chunk = N / workers; if (chunk < 1) chunk = 1;
+
+            // Warm up the fiber pool / caches / branch predictors before timing.
+            std::atomic<long long> warm{ 0 };
+            for (int w = 0; w < 5; ++w)
+                s.ParallelFor(0, N, chunk, [&](int a, int b) {
+                    double l = 0; for (int i = a; i < b; ++i) l += std::sqrt((double)i);
+                    warm.fetch_add((long long)l, std::memory_order_relaxed); });
+
+            std::vector<double> ts, tp; ts.reserve(REPS); tp.reserve(REPS);
+            for (int r = 0; r < REPS; ++r) {
+                // --- serial ---
+                auto a0 = std::chrono::high_resolution_clock::now();
+                double acc = 0; for (int i = 0; i < N; ++i) acc += std::sqrt((double)i);
+                auto a1 = std::chrono::high_resolution_clock::now();
+                ssink += (long long)acc;
+                ts.push_back(std::chrono::duration<double, std::micro>(a1 - a0).count());
+
+                // --- parallel ---
+                std::atomic<long long> psink{ 0 };
+                auto b0 = std::chrono::high_resolution_clock::now();
+                s.ParallelFor(0, N, chunk, [&](int a, int b) {
+                    double l = 0; for (int i = a; i < b; ++i) l += std::sqrt((double)i);
+                    psink.fetch_add((long long)l, std::memory_order_relaxed); });
+                auto b1 = std::chrono::high_resolution_clock::now();
+                tp.push_back(std::chrono::duration<double, std::micro>(b1 - b0).count());
+            }
+            std::sort(ts.begin(), ts.end());
+            std::sort(tp.begin(), tp.end());
+            double sMed = ts[REPS / 2], pMed = tp[REPS / 2];
+            printf("%-12d %-14.2f %-14.2f %-9.2fx\n", N, sMed, pMed, sMed / pMed);
+            fflush(stdout);
+        }
         return 0;
     }
 

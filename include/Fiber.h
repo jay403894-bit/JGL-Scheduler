@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "Task.h"
 #include <atomic>
+#include <cstdint>
 namespace T_Threads {
 	enum class FiberStatus {
 		READY,         // In a work queue, waiting to be run/stolen
@@ -21,6 +22,11 @@ namespace T_Threads {
 		Task* owningTask = nullptr; // The task currently running on this fiber
 		Context* homeCtx = nullptr; // Scheduler ctx to return to; the worker sets this before each switch-in
 		std::atomic<FiberStatus>  status;
+		// EBR participation slot. SIZE_MAX == "not in an epoch". The fiber is the unit
+		// that migrates across workers, so the slot lives here (not on the thread).
+		// Default member init covers the move ctor too (a moved/fresh fiber is not in an
+		// epoch), so the move ctor doesn't need to mention it.
+		std::atomic<size_t> localEpoch{ SIZE_MAX };
 		static std::atomic<uint64_t> idGenerator;
 		void (*taskFunction)();
 		Fiber() : stackBase(nullptr), stackSize(0), taskFunction(nullptr), status(FiberStatus::READY), id(idGenerator.fetch_add(1, std::memory_order_relaxed)) {
