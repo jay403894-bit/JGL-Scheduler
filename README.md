@@ -22,10 +22,11 @@ A high-performance, lightweight C++17 fibers-based task scheduler / job system w
 
 Memory is **fully automated** using slab allocator combined with an **epoch-based garbage collection** system.
 
-You only need to call `Tick()` periodically from the **main thread**:
 
-
+----------
 Motivation
+----------
+
 T_Threads was built as a hobby project to explore advanced parallelism in C++. It is currently used in my personal game/simulation engine.
 
 Usage
