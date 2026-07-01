@@ -186,7 +186,7 @@ void T_Thread::Worker() {
 			{
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 			}
-
+			
 			FiberStatus fs = f->status.load(std::memory_order_acquire);
 			if (fs == FiberStatus::DEAD) {
 				// Completed for good 
@@ -239,6 +239,22 @@ void T_Thread::Worker() {
 		// --- 2. Immediate task execution ---
 		{
 			if (immediateTask != nullptr) {
+				//dump inboxes to be stolen from the immediate task, so it doesn't get stuck
+				size_t count = 0;
+				while (count < BATCH_SIZE && scheduler->hiPriInboxes[qIndex]->pop(batch[count])) {
+					count++;
+				}
+				if (count > 0) {
+					scheduler->hiPri[qIndex]->push_bottom_batch(batch, count);
+				}
+
+				count = 0;
+				while (count < BATCH_SIZE && scheduler->loPriInboxes[qIndex]->pop(batch[count])) {
+					count++;
+				}
+				if (count > 0) {
+					scheduler->loPri[qIndex]->push_bottom_batch(batch, count);
+				}	
 				task_to_run = immediateTask;
 				current_task = immediateTask;
 				immediateTask = nullptr;
