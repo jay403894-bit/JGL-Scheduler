@@ -2,6 +2,9 @@
 #include <vector>
 #include <cstddef>
 #include <mutex>
+#ifdef _DEBUG
+#include <Windows.h> // OutputDebugStringA/__debugbreak for the free-list canary check below
+#endif
 namespace T_Threads {
     class TaskAllocator {
     public:
@@ -27,14 +30,51 @@ namespace T_Threads {
 
     public:
         explicit TaskAllocator(size_t slots) : mem(slots) {
-            for (auto& blk : mem) { next(&blk) = sharedHead; sharedHead = &blk; }
+            for (auto& blk : mem) {
+                next(&blk) = sharedHead; sharedHead = &blk;
+#ifdef _DEBUG
+                // Every slot starts life "free" -- stamp the canary here too (not just in
+                // Free()), or the FIRST-ever Alloc() of a never-before-freed slot reads
+                // whatever value(std::byte)-initialization left at bytes[8,16) (zero), which
+                // doesn't match the canary and looks exactly like corruption on startup.
+                *reinterpret_cast<uint64_t*>(reinterpret_cast<std::byte*>(&blk) + 8) = 0xFEEDFACECAFEBEEFULL;
+#endif
+            }
         }
+
+#ifdef _DEBUG
+        // Bytes [8,16) of a slot hold the intrusive "next free" link's tail + are otherwise
+        // unused while free (the link itself only needs the first 8 bytes). Free() stamps a
+        // canary there; Alloc() verifies it's UNCHANGED before handing the slot back out. If
+        // something wrote through this slot AFTER it was freed (use-after-free) or if the same
+        // slot got Free()'d twice (corrupting the free-list into aliasing two live owners), the
+        // canary will have been clobbered by whatever real data got written into the
+        // still-technically-free slot -- this catches it at the NEXT Alloc() of that exact slot,
+        // right at the point of detection, instead of silently corrupting the free-list chain
+        // until the whole pool eventually appears "exhausted" (Alloc() returning nullptr) far
+        // downstream of the actual bug.
+        static constexpr uint64_t kFreeCanary = 0xFEEDFACECAFEBEEFULL;
+        static void StampCanary(void* slot) {
+            *reinterpret_cast<uint64_t*>(reinterpret_cast<std::byte*>(slot) + 8) = kFreeCanary;
+        }
+        static void CheckCanary(void* slot) {
+            uint64_t v = *reinterpret_cast<uint64_t*>(reinterpret_cast<std::byte*>(slot) + 8);
+            if (v != kFreeCanary) {
+                OutputDebugStringA("TaskAllocator: corrupted freed slot detected "
+                    "(use-after-free or double-free) -- breaking at the Alloc() that noticed.\n");
+                __debugbreak();
+            }
+        }
+#endif
 
         void* Alloc() {                        // lock-Free unless the cache is empty
             Cache& c = local();
             if (!c.head) refill(c);
             if (!c.head) return nullptr;       // backing fully exhausted
             void* slot = c.head;
+#ifdef _DEBUG
+            CheckCanary(slot);
+#endif
             c.head = next(slot);
             c.count--;
             return slot;
@@ -43,6 +83,9 @@ namespace T_Threads {
         void Free(void* slot) {                // lock-Free unless the cache overflows
             Cache& c = local();
             next(slot) = c.head;
+#ifdef _DEBUG
+            StampCanary(slot);
+#endif
             c.head = slot;
             c.count++;
             if (c.count > 2 * BATCH) flush(c);

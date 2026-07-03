@@ -172,6 +172,23 @@ namespace T_Threads {
 			head->next.set(tail, false);
 		}
 		~LockFreeList() {
+			// Free every LIVE entry between the sentinels too, not just head/tail -- entries
+			// added via add() (e.g. TaskDAG::AddDependency's edges) were being leaked forever,
+			// since nothing ever called remove() on them and the destructor only reclaimed the
+			// two sentinels. Confirmed root cause of a slow TaskAllocator exhaustion: 6
+			// AddDependency() calls/frame in one particular app, each permanently leaking one
+			// slab slot the moment this list's owning TaskNode got destroyed.
+			// Safe to walk WITHOUT an EpochGuard: by the time this destructor runs (via
+			// NodeDeleter, after EBR retirement), no reader can still be traversing this list --
+			// that's the whole point of retiring the OWNING node through EBR first.
+			LNodeBase* curr = head->next.getReference();
+			while (curr != tail) {
+				LNodeBase* next = curr->next.getReference();
+				LNode<T>* typed = static_cast<LNode<T>*>(curr);
+				typed->data.~T();
+				allocator.Free(curr);
+				curr = next;
+			}
 			allocator.Free(head);
 			allocator.Free(tail);
 		}
