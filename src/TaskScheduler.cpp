@@ -1,7 +1,9 @@
 #include "../include/T_Thread.h"
 #include "../include/TaskScheduler.h"
 #include "../include/Event.h"
+#include "../include/platform.h"
 #include <stdexcept>
+#include <vector>
 using namespace T_Threads;
 
 static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
@@ -176,6 +178,115 @@ void TaskScheduler::ParallelForNB(int start, int end, int chunkSize, std::functi
 		Push([=]() { func(chunkStart, chunkEnd); });
 	}
 }
+// Queries real Windows topology (GetLogicalProcessorInformationEx) and fills siblingQIndex/
+// clusterMates from it -- NOT from the sequential affinity scheme assumption (worker qIndex i
+// is pinned to logical CPU i+1, main sits on 0). That mapping tells you what you ASKED the OS
+// for, not what the hardware actually looks like (adjacent logical CPU numbers being SMT/cache
+// neighbors is a common convention, never a guarantee). Limitation: only considers processor
+// GROUP 0 (fine for the vast majority of desktop/workstation hardware, i.e. <=64 logical CPUs;
+// a true >64-logical-CPU multi-group machine would need GROUP_AFFINITY.Group handled too).
+// On ANY failure (API unsupported, nothing returned, etc.) falls back to safe defaults: no SMT
+// sibling for anyone, and everyone in one big cluster -- equivalent to the old plain-random
+// behavior, just never wrong.
+static bool GetGroupMasksForRelation(LOGICAL_PROCESSOR_RELATIONSHIP relation, std::vector<ULONG_PTR>& outMasks) {
+	DWORD len = 0;
+	GetLogicalProcessorInformationEx(relation, nullptr, &len);
+	if (len == 0) return false;
+
+	std::vector<std::byte> buffer(len);
+	auto* base = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+	if (!GetLogicalProcessorInformationEx(relation, base, &len)) return false;
+
+	DWORD offset = 0;
+	while (offset < len) {
+		auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+		if (info->Relationship == relation) {
+			const PROCESSOR_RELATIONSHIP& proc = info->Processor;
+			for (WORD g = 0; g < proc.GroupCount; ++g) {
+				if (proc.GroupMask[g].Group == 0) {
+					outMasks.push_back(proc.GroupMask[g].Mask);
+				}
+			}
+		}
+		offset += info->Size;
+	}
+	return true;
+}
+
+void TaskScheduler::BuildTopology(unsigned int num_workers) {
+	siblingQIndex.assign(num_workers, -1);
+	clusterMates.assign(num_workers, {});
+
+	// logical CPU -> qIndex, per the known affinity scheme (0 = main, i+1 = worker i).
+	auto qIndexOf = [num_workers](int logicalCpu) -> int {
+		if (logicalCpu < 1) return -1;
+		unsigned int q = (unsigned int)(logicalCpu - 1);
+		return (q < num_workers) ? (int)q : -1;
+	};
+
+	std::vector<ULONG_PTR> coreMasks;    // one entry per physical core -- SMT sibling groups
+	std::vector<ULONG_PTR> cacheMasks;   // one entry per LLC instance -- cluster groups
+	bool haveCores = GetGroupMasksForRelation(RelationProcessorCore, coreMasks);
+	bool haveCache = GetGroupMasksForRelation(RelationCache, cacheMasks);
+
+	if (haveCores) {
+		for (ULONG_PTR mask : coreMasks) {
+			std::vector<int> qsInGroup;
+			for (int cpu = 0; cpu < 64; ++cpu) {
+				if (mask & (ULONG_PTR(1) << cpu)) {
+					int q = qIndexOf(cpu);
+					if (q >= 0) qsInGroup.push_back(q);
+				}
+			}
+			// Only meaningful if exactly two POOL WORKERS share this physical core -- if the
+			// group is size 1 (its SMT sibling is main or an unused logical CPU) there's no
+			// worker sibling to record.
+			if (qsInGroup.size() == 2) {
+				siblingQIndex[qsInGroup[0]] = qsInGroup[1];
+				siblingQIndex[qsInGroup[1]] = qsInGroup[0];
+			}
+		}
+	}
+
+	if (haveCache) {
+		for (ULONG_PTR mask : cacheMasks) {
+			// RelationCache returns one record PER cache instance PER level (L1/L2/L3 all
+			// come back through this same query) -- we only want the last-level one(s), which
+			// in practice are the masks covering the MOST logical CPUs. Filtering by "biggest
+			// masks seen" below (after the loop) is simpler than threading the cache Level
+			// field through GetGroupMasksForRelation, so just collect qIndex groups for every
+			// mask here and pick the highest-CPU-count group per worker afterward.
+			std::vector<int> qsInGroup;
+			for (int cpu = 0; cpu < 64; ++cpu) {
+				if (mask & (ULONG_PTR(1) << cpu)) {
+					int q = qIndexOf(cpu);
+					if (q >= 0) qsInGroup.push_back(q);
+				}
+			}
+			if (qsInGroup.size() < 2) continue;
+			for (int q : qsInGroup) {
+				// Keep the LARGEST group seen for this worker -- that's the last-level
+				// (widest-sharing) cache instance rather than a narrower L1/L2 one.
+				if (qsInGroup.size() > clusterMates[q].size() + 1) {
+					clusterMates[q].clear();
+					for (int other : qsInGroup) {
+						if (other != q && other != siblingQIndex[q]) clusterMates[q].push_back(other);
+					}
+				}
+			}
+		}
+	}
+	else {
+		// Fallback: no cache topology available -- treat the whole pool as one cluster so
+		// locality-first-random-fallback degrades to exactly the old plain-random behavior.
+		for (unsigned int q = 0; q < num_workers; ++q) {
+			for (unsigned int other = 0; other < num_workers; ++other) {
+				if (other != q && (int)other != siblingQIndex[q]) clusterMates[q].push_back((int)other);
+			}
+		}
+	}
+}
+
 void TaskScheduler::StartPool(size_t poolSize) {
 	std::lock_guard<std::mutex> lock(poolMutex);
 	thread_counter.store(0, std::memory_order_release);
@@ -189,6 +300,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	// of StartPool and uses epochs too (e.g. DAG AddDependency -> EnterEpoch). Sizing to
 	// just num_workers leaves that slot out of bounds -> AV in Enter/LeaveEpoch.
 	EpochManager::Instance().Init(num_workers + 1);
+	BuildTopology(num_workers);
 	stopFlag.store(false, std::memory_order_release);
 	nextWorker = 0;
 	unsigned int coreCount = std::thread::hardware_concurrency()-1;
@@ -285,15 +397,19 @@ void TaskScheduler::RunCounted(WaitGroup& wg, Task* t) {
 }
 
 void TaskScheduler::WaitFor(WaitGroup& wg) {
-	// The caller (e.g. the main render thread) is NOT a worker: it has no fiber and no
-	// place to free a task's slab. Stealing + inline-running tasks here was a triple bug:
-	//   1. inline Execute() never runs ~Task()/Free() -> slab leak (the worker path frees).
-	//   2. GetTask() steals from the SAME deques workers pop from -> a last-element race can
-	//      hand one task to both, so two threads Reset()+record ONE command list -> GPU hang.
-	//   3. a stolen task that suspends/yields would deref a null currentFiber.
-	// Just wait; the workers run AND free these tasks correctly.
-	while (wg.n.load(std::memory_order_acquire) > 0)
-		std::this_thread::yield();
+	// The caller (e.g. the main render thread) is NOT a worker -- it has no fiber, so it must
+	// never run a task that might suspend, and it must free anything it does run itself
+	// correctly (the worker path frees; a bare inline Execute() would leak the slab). Both of
+	// those used to make stealing here unsafe. TryRunStolenFastJob() now handles both: it only
+	// ever executes a stolen fastJob task (by contract, never suspends) and frees it with the
+	// exact same sequence Worker() uses, or hands a non-fastJob task straight back via
+	// Requeue() without running it. GetTask() itself (a plain steal() across every deque) was
+	// always safe for any number of concurrent thieves, worker or not -- that part was never
+	// actually the problem. Only yield when there's nothing to steal, to avoid a hot spin.
+	while (wg.n.load(std::memory_order_acquire) > 0) {
+		if (!TryRunStolenFastJob())
+			std::this_thread::yield();
+	}
 }
 void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
 {

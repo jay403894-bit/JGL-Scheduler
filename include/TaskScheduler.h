@@ -148,6 +148,25 @@ namespace T_Threads {
 		bool PushToCore(size_t core_id, Task* task);
 		int PickNextWorker();
 
+		// ---------- topology-aware steal biasing ----------
+		// Queried ONCE at StartPool() time via GetLogicalProcessorInformationEx -- real
+		// hardware topology, not an assumption from the sequential affinity scheme (worker
+		// qIndex i is pinned to logical CPU i+1, main sits on logical CPU 0; that mapping alone
+		// doesn't tell you which logical CPUs actually share a core or an LLC on THIS machine).
+		void BuildTopology(unsigned int num_workers);
+		// clusterMates[qIndex] -- other worker qIndexes sharing this worker's last-level cache
+		// domain, EXCLUDING its direct SMT sibling (that's handled separately below, since it
+		// needs the extra "only if idle" check). Tried first, in random order, before falling
+		// back to the existing global-random steal.
+		std::vector<std::vector<int>> clusterMates;
+		// siblingQIndex[qIndex] -- the OTHER worker qIndex sharing this worker's physical core
+		// (SMT sibling), or -1 if none (no SMT, or the sibling logical CPU isn't a pool worker
+		// -- e.g. it's main's). Only stolen from if idle (see T_Thread::busy) -- a busy SMT
+		// sibling shares this worker's execution ports, so stealing its work doesn't recruit
+		// any additional throughput, just adds queued work to an already-contended core.
+		std::vector<int> siblingQIndex;
+		// -----------------------------------------------
+
 		static TaskScheduler* instance;
 		TaskAllocator taskAllocator{ 1024 * 1024 }; // 1M tasks
 		std::unordered_map<std::string, std::unique_ptr<Event>> eventRegistry;

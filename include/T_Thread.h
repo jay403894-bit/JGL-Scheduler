@@ -24,10 +24,15 @@ namespace T_Threads {
     public:
         static thread_local T_Thread* self;
 
-        Context schedulerCtx; 
-        Fiber* currentFiber = nullptr; 
+        Context schedulerCtx;
+        Fiber* currentFiber = nullptr;
         Task* currentRunningTask = nullptr;
         int qIndex = 0;
+        // True while this worker is actively executing a task (fast path OR on a fiber) --
+        // a cheap heuristic hint for OTHER workers deciding whether to steal from an SMT
+        // sibling (see TaskScheduler::siblingQIndex). Relaxed: a stale read just makes the
+        // heuristic slightly worse for one steal attempt, never incorrect/unsafe.
+        std::atomic<bool> busy{ false };
 
         T_Thread(TaskScheduler& scheduler);
         T_Thread(const T_Thread& other) = delete;

@@ -158,7 +158,9 @@ void T_Thread::Worker() {
 			// worker's real call stack.
 			if (task_to_run->fastJob) {
 				currentRunningTask = task_to_run;
+				busy.store(true, std::memory_order_relaxed);
 				task_to_run->Execute();
+				busy.store(false, std::memory_order_relaxed);
 				currentRunningTask = nullptr;
 
 				task_to_run->~Task();
@@ -213,10 +215,12 @@ void T_Thread::Worker() {
 			f->homeCtx = &this->schedulerCtx;   // where the fiber returns to: THIS worker
 			currentRunningTask = task_to_run;
 			currentFiber = f;
+			busy.store(true, std::memory_order_relaxed);
 			{
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
 			}
-			
+			busy.store(false, std::memory_order_relaxed);
+
 			FiberStatus fs = f->status.load(std::memory_order_acquire);
 			if (fs == FiberStatus::DEAD) {
 				// Completed for good 
@@ -327,23 +331,51 @@ void T_Thread::Worker() {
 		{
 			// --- 4. Work stealing ---
 			if (!task_to_run) {
-				size_t stride = 1;
-				size_t neighbor = (qIndex + stride) % scheduler->workers.size();
+				// Non-blocking backoff: a per-worker (thread_local, no shared/contended state --
+				// can't itself become a new source of contention) count of consecutive whole-
+				// steal-block misses. Above the threshold, shrink how many clusterMates get
+				// probed each iteration (down to 1) instead of the full set -- reduces redundant
+				// CAS/cache-line traffic pool-wide during a steal storm (many idle workers all
+				// hammering the same handful of targets) without ever sleeping, so this worker
+				// stays fully responsive to a fresh immediate/forked task or inbox item. Resets
+				// to 0 the instant ANY steal succeeds -- "the storm cleared" observed via a real
+				// outcome, since TaskDeque::steal() is lock-free (CAS-based, no actual lock to
+				// wait on).
+				static thread_local int consecutiveMisses = 0;
+				constexpr int kBackoffMissThreshold = 8;
 
-				// 1. Try to steal High Priority from the immediate neighbor first
-				if (auto stolen = scheduler->hiPri[neighbor]->steal()) {
-					task_to_run = *stolen;
+				// Locality-first, random fallback -- built from REAL queried topology
+				// (TaskScheduler::BuildTopology), not an assumption about the affinity scheme:
+				//  1. Try same-last-level-cache mates (clusterMates), random order, EXCLUDING
+				//     the direct SMT sibling (handled separately below).
+				//  2. If the SMT sibling is currently IDLE, try it -- a BUSY sibling shares
+				//     this core's execution ports, so stealing its work wouldn't recruit any
+				//     new throughput, just pile more work onto an already-contended core.
+				//  3. Fall back to the old global-random steal across everyone.
+				const auto& mates = scheduler->clusterMates[qIndex];
+				if (!mates.empty()) {
+					size_t probeLimit = (consecutiveMisses < kBackoffMissThreshold)
+						? mates.size() : (size_t)1;
+					size_t mstart = FastRand() % mates.size();
+					for (size_t i = 0; i < probeLimit; ++i) {
+						int target = mates[(mstart + i) % mates.size()];
+						if (auto stolen = scheduler->hiPri[target]->steal()) { task_to_run = *stolen; break; }
+						if (auto stolen = scheduler->loPri[target]->steal()) { task_to_run = *stolen; break; }
+					}
 				}
-				// 2. If no HiPri, try to steal Low Priority from the neighbor
-				else if (auto stolen = scheduler->loPri[neighbor]->steal()) {
-					task_to_run = *stolen;
+
+				if (!task_to_run) {
+					int sibling = scheduler->siblingQIndex[qIndex];
+					if (sibling >= 0 && !scheduler->workers[sibling]->busy.load(std::memory_order_relaxed)) {
+						if (auto stolen = scheduler->hiPri[sibling]->steal()) task_to_run = *stolen;
+						else if (auto stolen = scheduler->loPri[sibling]->steal()) task_to_run = *stolen;
+					}
 				}
-				else {
-					// 3. Try to steal from a random worker
+
+				if (!task_to_run) {
 					int res = FastRand() % (scheduler->workers.size() - 1);
 					if (res == qIndex) res++;
 
-					// Again: HiPri first, then LoPri
 					if (auto stolen = scheduler->hiPri[res]->steal()) {
 						task_to_run = *stolen;
 					}
@@ -353,8 +385,12 @@ void T_Thread::Worker() {
 				}
 
 				if (task_to_run) {
+					consecutiveMisses = 0;
 					current_task = task_to_run;
 					continue;
+				}
+				else {
+					++consecutiveMisses;
 				}
 			}
 		}
