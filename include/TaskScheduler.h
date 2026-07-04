@@ -76,11 +76,27 @@ namespace T_Threads {
 		void Stop(Task* worker_task);
 		TaskAllocator* GetAllocator();
 		void WaitAll();
-		 
-		Task* CreateTask(void(*fn)(void*), void* data, uint8_t hipri = false, FiberSize size = FiberSize::Standard);
+
+		// Lets a non-worker caller (e.g. main, while spinning on a WaitGroup/counter) safely
+		// help drain the pool instead of pure-spinning. Steals ONE task via GetTask() (plain
+		// steal() across every deque -- safe for any number of concurrent thieves, worker or
+		// not) and either runs it or hands it back:
+		//  - fastJob (the common case, see Task::fastJob): runs Execute() inline right here,
+		//    then frees it with the EXACT SAME sequence Worker()'s fast path uses (~Task(),
+		//    Free(), pendingTasks decrement, EBR tick check) -- required so the slab and
+		//    pendingTasks/WaitAll() stay correct; skipping any one of these either leaks a
+		//    slab slot or hangs a WaitAll().
+		//  - NOT fastJob: this caller has no fiber to suspend it on if it ever calls
+		//    WaitOnEvent*, so it's handed back via Requeue() (does NOT touch pendingTasks --
+		//    the task was already counted, it's only relocating) for a real worker to run.
+		// Returns true if it did anything (ran or requeued a task), false if there was nothing
+		// to steal -- callers should yield() on false to avoid a hot spin.
+		bool TryRunStolenFastJob();
+
+		Task* CreateTask(void(*fn)(void*), void* data, uint8_t hipri = false, FiberSize size = FiberSize::Standard, uint8_t fastJob = true);
 
 		template<typename F>
-		auto CreateTask(F&& f, uint8_t hipri = false, FiberSize size = FiberSize::Standard) {
+		auto CreateTask(F&& f, uint8_t hipri = false, FiberSize size = FiberSize::Standard, uint8_t fastJob = true) {
 			using L = LambdaTask<std::decay_t<F>>;
 			static_assert(sizeof(L) <= TaskAllocator::SLOT, "lambda too big for a slot");
 			static_assert(alignof(L) <= 16, "lambda over-aligned for the slot");
@@ -89,6 +105,7 @@ namespace T_Threads {
 			L* t = ::new (mem) L(std::forward<F>(f));
  			t->hiPri = hipri;
 			t->requiredSize = size;
+			t->fastJob = fastJob;
 			return t;
 		}
 		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>

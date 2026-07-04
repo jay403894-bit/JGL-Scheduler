@@ -1,6 +1,7 @@
 #include "../include/T_Thread.h"
 #include "../include/TaskScheduler.h"
 #include "../include/Event.h"
+#include <stdexcept>
 using namespace T_Threads;
 
 static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
@@ -143,9 +144,15 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 		// 3. Main computes its own lane while the workers churn -- no wasted thread.
 		func(mainChunkStart, mainChunkEnd);
 
-		// 4. Then wait; the workers run AND free their tasks correctly.
-		while (remaining.load(std::memory_order_acquire) > 0)
-			std::this_thread::yield();
+		// 4. Then wait -- but opportunistically help drain the pool instead of pure-spinning.
+		// TryRunStolenFastJob() steals from ANY deque (not scoped to just this call's own
+		// chunks), so this may run unrelated work from elsewhere in the app; that's fine, it's
+		// bounded (fastJob tasks are meant to be short) and genuinely reduces total backlog.
+		// Only yield when there's nothing at all to steal, to avoid a hot spin either way.
+		while (remaining.load(std::memory_order_acquire) > 0) {
+			if (!TryRunStolenFastJob())
+				std::this_thread::yield();
+		}
 
 		delete[] taskPtrs;
 	}
@@ -242,6 +249,12 @@ void TaskScheduler::WaitOnEvent(const std::string& eventName) {
 	auto* thread = T_Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
+	if (!myFiber) {
+		// A fastJob task (see Task::fastJob) runs with no fiber underneath it -- there's
+		// nothing to switch away to. This is a contract violation, not a transient failure.
+		throw std::runtime_error("WaitOnEvent called from a task with no assigned fiber -- "
+			"fastJob tasks must never suspend.");
+	}
 
 	auto& event = GetEvent(eventName);
 
@@ -324,6 +337,10 @@ void TaskScheduler::WaitOnEventArmed(const std::string& eventName, const std::fu
 	auto* thread = T_Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
+	if (!myFiber) {
+		throw std::runtime_error("WaitOnEventArmed called from a task with no assigned fiber -- "
+			"fastJob tasks must never suspend.");
+	}
 
 	auto& event = GetEvent(eventName);
 
@@ -344,6 +361,10 @@ void TaskScheduler::WaitOnEventDirectArmed(const std::function<void(DirectEvent*
 	auto* thread = T_Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
+	if (!myFiber) {
+		throw std::runtime_error("WaitOnEventDirectArmed called from a task with no assigned "
+			"fiber -- fastJob tasks must never suspend.");
+	}
 
 	DirectEvent* e = eventPool.Acquire();   // pool sized for max concurrent waits (never null in practice)
 
@@ -366,7 +387,10 @@ void TaskScheduler::WaitOnEventDirectArmed(const std::function<void(DirectEvent*
 
 bool TaskScheduler::IsOnFiber() {
 	auto* t = T_Thread::GetCurrent();
-	return t != nullptr && t->currentRunningTask != nullptr;
+	// currentRunningTask alone isn't enough -- a fastJob task sets it too (see Worker()'s fast
+	// path) but deliberately never gets a fiber. Callers use this to decide whether
+	// WaitOnEvent*-style suspension is safe, so it must be false for a fastJob task.
+	return t != nullptr && t->currentRunningTask != nullptr && t->currentFiber != nullptr;
 }
 
 Event& TaskScheduler::GetEvent(const std::string& name) {
@@ -415,6 +439,28 @@ Task* TaskScheduler::GetTask() {
 	return task_to_run;
 }
 
+bool TaskScheduler::TryRunStolenFastJob() {
+	Task* task = GetTask();  // plain steal() across every deque -- safe for any caller
+	if (!task) return false;
+
+	if (!task->fastJob) {
+		// Can't safely run this here (might suspend, and this caller has no fiber) --
+		// Requeue does NOT touch pendingTasks, it's only relocating an already-counted task.
+		Requeue(task);
+		return true;
+	}
+
+	task->Execute();
+	task->~Task();
+	taskAllocator.Free(task);
+	pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+
+	if (EpochManager::Instance().RetiredCount() > 512) {
+		EpochManager::Instance().Tick();
+	}
+	return true;
+}
+
 TaskAllocator* TaskScheduler::GetAllocator() {
 	return &taskAllocator;
 }
@@ -423,10 +469,11 @@ void TaskScheduler::WaitAll() {
 		std::this_thread::yield();
 }
 
-Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, FiberSize size) {
+Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, FiberSize size, uint8_t fastJob) {
 	void* mem = taskAllocator.Alloc();
 	if (!mem) return nullptr;
 	Task* t = ::new (mem) Task(fn, data, hipri, size);
+	t->fastJob = fastJob;
 	return t;
 }
 

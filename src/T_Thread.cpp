@@ -149,6 +149,36 @@ void T_Thread::Worker() {
 		ready.store(true, std::memory_order_release);
 		// --- 1. Execute task if found ---
 		if (task_to_run) {
+			// Fast path: run directly on THIS worker's own OS-thread stack, no fiber acquired
+			// or ContextSwitch paid at all. Only safe because fastJob tasks are a CONTRACT --
+			// they must never call WaitOnEvent*/anything that suspends (there's no fiber here
+			// to switch away to). assignedFiber is deliberately left nullptr for these tasks,
+			// which is exactly what WaitOnEvent*'s guards check for -- a mismarked fastJob
+			// task that tries to suspend anyway fails loudly there instead of corrupting the
+			// worker's real call stack.
+			if (task_to_run->fastJob) {
+				currentRunningTask = task_to_run;
+				task_to_run->Execute();
+				currentRunningTask = nullptr;
+
+				task_to_run->~Task();
+				scheduler->GetAllocator()->Free(task_to_run);
+				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+
+				if (is_handling_fork) {
+					if (qIndex < (int)scheduler->immediateCoresInUse.size()) {
+						scheduler->immediateCoresInUse[qIndex]->store(false, std::memory_order_release);
+					}
+					is_handling_fork = false;
+				}
+				if (EpochManager::Instance().RetiredCount() > 512) {
+					EpochManager::Instance().Tick();
+				}
+				task_to_run = nullptr;
+				ready.store(true, std::memory_order_release);
+				continue;
+			}
+
 			Fiber* existingFiber = task_to_run->assignedFiber;
 
 			Fiber* f;

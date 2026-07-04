@@ -2,6 +2,8 @@
 #include "Task.h"
 #include "TaskAllocator.h"   // the node only needs the allocator, not the whole scheduler
 #include "LockFreeList.h"
+#include <stdexcept>
+#include <string>
 
 namespace T_Threads {
     struct TaskNode {
@@ -35,6 +37,19 @@ namespace T_Threads {
             : alloc(allocator), task(t), dependencies_left(0)   // reference bound here
         {
             void* m = alloc.Alloc();
+            // CreateNode/CreateGate already checked THEIR OWN slot (the TaskNode itself), but
+            // this is a SECOND, separate allocation for the dependents list -- unchecked, this
+            // used to placement-new a LockFreeList at address nullptr when the pool was
+            // exhausted, writing through a null `this` inside LockFreeList's constructor
+            // (manifested as "Access violation writing location 0x0"). Throwing here at least
+            // turns silent memory corruption into a diagnosable, catchable failure with the
+            // live/capacity counts attached.
+            if (!m) {
+                throw std::runtime_error(
+                    "TaskAllocator exhausted while constructing a TaskNode's dependents list "
+                    "(live=" + std::to_string(allocator.LiveCount()) +
+                    ", capacity=" + std::to_string(allocator.Capacity()) + ")");
+            }
             dependents = new (m) LockFreeList<TaskNode*>(alloc);
         }
 

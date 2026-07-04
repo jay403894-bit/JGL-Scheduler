@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstddef>
 #include <mutex>
+#include <atomic>
 #ifdef _DEBUG
 #include <Windows.h> // OutputDebugStringA/__debugbreak for the free-list canary check below
 #endif
@@ -20,6 +21,7 @@ namespace T_Threads {
         std::vector<Block> mem;
         void* sharedHead = nullptr;
         std::mutex mtx;
+        std::atomic<long long> liveCount{ 0 }; // see LiveCount() below
 
         // ---- per-thread cache (the lock-Free hot path) ----
         struct Cache { void* head = nullptr; size_t count = 0; };
@@ -77,6 +79,7 @@ namespace T_Threads {
 #endif
             c.head = next(slot);
             c.count--;
+            liveCount.fetch_add(1, std::memory_order_relaxed);
             return slot;
         }
 
@@ -88,8 +91,17 @@ namespace T_Threads {
 #endif
             c.head = slot;
             c.count++;
+            liveCount.fetch_sub(1, std::memory_order_relaxed);
             if (c.count > 2 * BATCH) flush(c);
         }
+
+        // Diagnostic only: how many slots are currently checked out (Alloc'd but not yet
+        // Free'd), across every thread's cache + the shared pool. Not synchronized with
+        // Alloc/Free beyond the atomic itself -- a momentary snapshot, good enough to watch
+        // whether usage climbs monotonically (a real leak) or oscillates near a steady state
+        // (normal churn) while chasing an exhaustion bug.
+        long long LiveCount() const { return liveCount.load(std::memory_order_relaxed); }
+        size_t Capacity() const { return mem.size(); }
 
     private:
         void refill(Cache& c) {                // move up to BATCH from shared -> local
