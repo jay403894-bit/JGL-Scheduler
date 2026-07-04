@@ -651,6 +651,15 @@ bool TaskScheduler::PushToCore(size_t core_id, Task* task) {
 	size_t idx = (core_id - 1) % workers.size();
 	if (immediateCoresInUse[idx]->load(std::memory_order_acquire)) return false;
 
+	// Marks this core busy-with-a-fork until T_Thread::Worker() clears it on completion (see
+	// the is_handling_fork cleanup in both the fastJob and fiber-DEAD paths). If the forked
+	// task never returns (a long-running subsystem pinned here for the program's lifetime),
+	// this correctly STAYS true forever -- which is what makes PickNextWorker()'s existing
+	// skip-if-busy check actually mean something: without setting this, a never-returning fork
+	// would leave this worker's INBOX (not its deque -- that's still fully stealable) silently
+	// accepting new round-robin-dispatched work that nothing would ever drain again.
+	immediateCoresInUse[idx]->store(true, std::memory_order_release);
+
 	pendingTasks.fetch_add(1, std::memory_order_relaxed);
 	workers[idx]->SetImmediateTask(task);
 	workers[idx]->NotifyWorker();
