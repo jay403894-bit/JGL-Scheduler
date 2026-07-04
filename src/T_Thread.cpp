@@ -273,22 +273,44 @@ void T_Thread::Worker() {
 		// --- 2. Immediate task execution ---
 		{
 			if (immediateTask != nullptr) {
-				//dump inboxes to be stolen from the immediate task, so it doesn't get stuck
-				size_t count = 0;
-				while (count < BATCH_SIZE && scheduler->hiPriInboxes[qIndex]->pop(batch[count])) {
-					count++;
-				}
-				if (count > 0) {
-					scheduler->hiPri[qIndex]->push_bottom_batch(batch, count);
+				// Finish this worker's own queued inbox work FIRST, rather than dumping it for
+				// others to steal -- forking isn't urgent, and relying on a peer happening to
+				// steal it loses efficiency and risks unbounded latency if the pool is busy
+				// elsewhere. fastJob tasks (the common case, defaulted true) are GUARANTEED to
+				// never suspend, so they're executed to completion right here, no fiber needed
+				// -- genuinely finished, not just relocated. A non-fastJob task COULD
+				// legitimately suspend on an external event; forcing it to finish inline isn't
+				// possible without duplicating the whole fiber/status state machine, so THOSE
+				// still fall back to the deque for stealing (the old behavior) as the safety
+				// net for that rarer case. Only the INBOX needs this treatment -- anything
+				// already sitting in this worker's own deque was already directly stealable via
+				// steal(), it was never actually at risk.
+				auto drainInbox = [&](TaskMPSCQueue* inbox, TaskDeque* deque) {
+					size_t count = 0;
+					while (count < BATCH_SIZE && inbox->pop(batch[count])) count++;
+					for (size_t i = 0; i < count; ++i) {
+						Task* t = batch[i];
+						if (!t) continue;
+						if (t->fastJob) {
+							busy.store(true, std::memory_order_relaxed);
+							t->Execute();
+							busy.store(false, std::memory_order_relaxed);
+							t->~Task();
+							scheduler->GetAllocator()->Free(t);
+							scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+						}
+						else {
+							deque->push_bottom(t); // safety net: may suspend, can't force-finish here
+						}
+					}
+				};
+				drainInbox(scheduler->hiPriInboxes[qIndex].get(), scheduler->hiPri[qIndex].get());
+				drainInbox(scheduler->loPriInboxes[qIndex].get(), scheduler->loPri[qIndex].get());
+
+				if (EpochManager::Instance().RetiredCount() > 512) {
+					EpochManager::Instance().Tick();
 				}
 
-				count = 0;
-				while (count < BATCH_SIZE && scheduler->loPriInboxes[qIndex]->pop(batch[count])) {
-					count++;
-				}
-				if (count > 0) {
-					scheduler->loPri[qIndex]->push_bottom_batch(batch, count);
-				}	
 				task_to_run = immediateTask;
 				current_task = immediateTask;
 				immediateTask = nullptr;
