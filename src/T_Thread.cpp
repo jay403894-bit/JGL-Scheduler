@@ -374,6 +374,32 @@ void T_Thread::Worker() {
 				//     this core's execution ports, so stealing its work wouldn't recruit any
 				//     new throughput, just pile more work onto an already-contended core.
 				//  3. Fall back to the old global-random steal across everyone.
+				// Steal up to 4 in one CAS instead of one steal() per task -- amortizes the
+				// atomic RMW cost across the batch. Only out[0] becomes task_to_run; anything
+				// else stolen alongside it lands on THIS worker's own deque (matching priority
+				// tier) via push_bottom_batch, so it's immediately available locally without
+				// needing more remote CAS traffic -- or, in the near-impossible case that this
+				// worker's own deque is somehow full, Requeue() so it's never simply lost.
+				constexpr size_t kStealBatchCap = 4;
+				auto tryStealBatchFrom = [&](int target) -> bool {
+					Task* stolen[kStealBatchCap];
+					TaskDeque* ownDeque = scheduler->hiPri[qIndex].get();
+					size_t n = scheduler->hiPri[target]->steal_batch(stolen, kStealBatchCap);
+					if (n == 0) {
+						n = scheduler->loPri[target]->steal_batch(stolen, kStealBatchCap);
+						ownDeque = scheduler->loPri[qIndex].get();
+					}
+					if (n == 0) return false;
+
+					task_to_run = stolen[0];
+					if (n > 1 && !ownDeque->push_bottom_batch(&stolen[1], n - 1)) {
+						for (size_t i = 1; i < n; ++i) {
+							if (!ownDeque->push_bottom(stolen[i])) scheduler->Requeue(stolen[i]);
+						}
+					}
+					return true;
+				};
+
 				const auto& mates = scheduler->clusterMates[qIndex];
 				if (!mates.empty()) {
 					size_t probeLimit = (consecutiveMisses < kBackoffMissThreshold)
@@ -381,29 +407,21 @@ void T_Thread::Worker() {
 					size_t mstart = FastRand() % mates.size();
 					for (size_t i = 0; i < probeLimit; ++i) {
 						int target = mates[(mstart + i) % mates.size()];
-						if (auto stolen = scheduler->hiPri[target]->steal()) { task_to_run = *stolen; break; }
-						if (auto stolen = scheduler->loPri[target]->steal()) { task_to_run = *stolen; break; }
+						if (tryStealBatchFrom(target)) break;
 					}
 				}
 
 				if (!task_to_run) {
 					int sibling = scheduler->siblingQIndex[qIndex];
 					if (sibling >= 0 && !scheduler->workers[sibling]->busy.load(std::memory_order_relaxed)) {
-						if (auto stolen = scheduler->hiPri[sibling]->steal()) task_to_run = *stolen;
-						else if (auto stolen = scheduler->loPri[sibling]->steal()) task_to_run = *stolen;
+						tryStealBatchFrom(sibling);
 					}
 				}
 
 				if (!task_to_run) {
 					int res = FastRand() % (scheduler->workers.size() - 1);
 					if (res == qIndex) res++;
-
-					if (auto stolen = scheduler->hiPri[res]->steal()) {
-						task_to_run = *stolen;
-					}
-					else if (auto stolen = scheduler->loPri[res]->steal()) {
-						task_to_run = *stolen;
-					}
+					tryStealBatchFrom(res);
 				}
 
 				if (task_to_run) {

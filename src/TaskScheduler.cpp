@@ -526,50 +526,53 @@ void TaskScheduler::Stop(Task* worker_task) {
 	stopFlag.store(true, std::memory_order_release);
 	worker_task->Stop();
 }
-Task* TaskScheduler::GetTask() {
-	Task* task_to_run = nullptr;
-	Task* task;
 
+
+// Batch version of GetTask() -- same random-start, hiPri-then-loPri scan, but pulls up to
+// maxCount items from whichever deque's steal_batch() actually hits, amortizing the CAS cost
+// across the batch instead of paying one CAS per stolen task. Caller (there's no per-caller
+// "own deque" assumption here -- this is used by non-workers too, e.g. main) is responsible
+// for what happens to items beyond out[0].
+size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
 	size_t numThreads = hiPri.size();
 	size_t start = rand() % numThreads;
 	for (size_t i = 0; i < numThreads; ++i) {
 		size_t target = (start + i) % numThreads;
-		auto opt = hiPri[target]->steal();
-		if (opt) {
-			task_to_run = *opt;
-			break;
-		}
+		size_t n = hiPri[target]->steal_batch(out, maxCount);
+		if (n > 0) return n;
 	}
-	if (!task_to_run) {
-		numThreads = loPri.size();
-		start = rand() % numThreads;
-		for (size_t i = 0; i < numThreads; ++i) {
-			size_t target = (start + i) % numThreads;
-			auto opt = loPri[target]->steal();
-			if (opt) {
-				task_to_run = *opt;
-				break;
-			}
-		}
+	numThreads = loPri.size();
+	start = rand() % numThreads;
+	for (size_t i = 0; i < numThreads; ++i) {
+		size_t target = (start + i) % numThreads;
+		size_t n = loPri[target]->steal_batch(out, maxCount);
+		if (n > 0) return n;
 	}
-	return task_to_run;
+	return 0;
 }
 
 bool TaskScheduler::TryRunStolenFastJob() {
-	Task* task = GetTask();  // plain steal() across every deque -- safe for any caller
-	if (!task) return false;
+	// Steal up to 4 in one CAS instead of one steal() per task -- everything beyond the first
+	// is bonus work found "for free" alongside it. Each item still gets the SAME per-item
+	// contract as before: fastJob runs inline with full completion bookkeeping, non-fastJob
+	// goes back via Requeue() (can't safely run here -- no fiber).
+	constexpr size_t kBatchCap = 4;
+	Task* batch[kBatchCap];
+	size_t n = GetTaskBatch(batch, kBatchCap);
+	if (n == 0) return false;
 
-	if (!task->fastJob) {
-		// Can't safely run this here (might suspend, and this caller has no fiber) --
-		// Requeue does NOT touch pendingTasks, it's only relocating an already-counted task.
-		Requeue(task);
-		return true;
+	for (size_t i = 0; i < n; ++i) {
+		Task* task = batch[i];
+		if (!task->fastJob) {
+			// Requeue does NOT touch pendingTasks, it's only relocating an already-counted task.
+			Requeue(task);
+			continue;
+		}
+		task->Execute();
+		task->~Task();
+		taskAllocator.Free(task);
+		pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 	}
-
-	task->Execute();
-	task->~Task();
-	taskAllocator.Free(task);
-	pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 
 	if (EpochManager::Instance().RetiredCount() > 512) {
 		EpochManager::Instance().Tick();

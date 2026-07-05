@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <optional>
 #include <iostream>
+#include <algorithm>
 
 #include "Task.h"
 
@@ -126,6 +127,37 @@ namespace T_Threads {
                 }
             }
             return std::nullopt;
+        }
+
+        // Steals up to maxCount items in ONE CAS instead of one-CAS-per-item -- the whole point
+        // is amortizing the atomic RMW cost across a batch. "Steal half" (not "take everything
+        // up to maxCount"): draining a victim to zero just relocates who's starving next: it'd
+        // have nothing left and immediately need to go steal from someone else in turn. Taking
+        // half keeps both sides supplied. Returns how many were actually written to out[]; 0 on
+        // an empty deque OR lost the race (owner's pop_bottom or another thief beat this CAS) --
+        // caller should treat 0 exactly like steal() returning nullopt and try elsewhere.
+        size_t steal_batch(Task** out, size_t maxCount) {
+            size_t t = top_.load(std::memory_order_acquire);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            size_t b = bottom_.load(std::memory_order_acquire);
+
+            if (t >= b) return 0; // empty
+
+            size_t available = b - t;
+            size_t n = std::min(maxCount, (available + 1) / 2);
+            if (n == 0) return 0;
+
+            // Read ALL n items speculatively BEFORE the CAS -- same discipline as steal()
+            // reading its one item before confirming ownership. If the CAS below fails,
+            // everything read here is simply discarded (correct under the same circular-
+            // buffer capacity assumptions the single-item steal() already relies on).
+            for (size_t i = 0; i < n; ++i)
+                out[i] = buffer_[(t + i) & mask_];
+
+            if (top_.compare_exchange_strong(t, t + n, std::memory_order_acq_rel, std::memory_order_relaxed))
+                return n;
+
+            return 0; // lost the race
         }
 
         size_t size() const {

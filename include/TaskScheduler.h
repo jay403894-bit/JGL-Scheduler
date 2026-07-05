@@ -142,7 +142,8 @@ namespace T_Threads {
 
 		void RunCounted(WaitGroup& wg, Task* t);
 		static size_t GetSafeTC();
-		Task* GetTask();
+		// Batch version of GetTask() -- see definition for details.
+		size_t GetTaskBatch(Task** out, size_t maxCount);
 		void StartPool(size_t poolSize);
 		bool PushLocal(Task* task, uint8_t cpuaffinity = 0);
 		bool PushToCore(size_t core_id, Task* task);
