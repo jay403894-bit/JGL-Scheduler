@@ -4,7 +4,7 @@
 #include "Task.h"
 #include <atomic>
 #include <cstdint>
-namespace JGL {
+namespace JLib {
 	enum class FiberStatus {
 		READY,         // In a work queue, waiting to be run/stolen
 		RUNNING,       // Currently executing on a worker
@@ -46,4 +46,4 @@ namespace JGL {
 		// Safety check for the work-stealer
 		bool IsReady() const { return status == FiberStatus::READY; }
 	};
-} // namespace JGL
+} // namespace JLib

@@ -7,7 +7,7 @@
 
 #include "Task.h"
 
-namespace JGL {
+namespace JLib {
 
     class alignas(64) TaskDeque {
     public:

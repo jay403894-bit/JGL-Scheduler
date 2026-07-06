@@ -11,7 +11,7 @@
 #include "Thread.h"
 #include "Fiber.h"
 
-namespace JGL {
+namespace JLib {
 	// Epoch slot for the current execution context: the running fiber's slot if we're on
 	// one, else this (bare) thread's fallback slot. The fiber branch is migration-proof --
 	// the slot travels with the fiber across a context switch. Bare threads (e.g. the main

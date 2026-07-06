@@ -2,6 +2,6 @@
 #include <atomic>
 #include <vector>
 
-namespace JGL {
+namespace JLib {
 	thread_local size_t thread_id = 0;
 }

@@ -6,7 +6,7 @@
 #include "Context.h"
 #include "concurrentqueue.h"
 
-namespace JGL {
+namespace JLib {
     class Thread;
     class GlobalFiberPool {
         mutable std::mutex poolMutex;

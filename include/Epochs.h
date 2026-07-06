@@ -6,7 +6,7 @@
 #include "Task.h"
 #include "concurrentqueue.h"
 
-namespace JGL {
+namespace JLib {
 	struct EpochParticipant {
 		std::atomic<size_t> localEpoch{ SIZE_MAX };
 	};
@@ -161,7 +161,7 @@ struct EpochGuard {
 
 	EpochGuard(std::atomic<size_t>* s) : slot(s) {
 		// Enter: store global epoch
-		slot->store(JGL::EpochManager::Instance().CurrentEpoch(),
+		slot->store(JLib::EpochManager::Instance().CurrentEpoch(),
 			std::memory_order_release);
 	}
 

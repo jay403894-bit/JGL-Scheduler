@@ -1,7 +1,7 @@
 #include "../include/GlobalFiberPool.h"
 #include "../include/Thread.h"
 
-using namespace JGL;
+using namespace JLib;
 
 GlobalFiberPool::GlobalFiberPool(size_t standardCount, size_t heavyCount)
 	: standardArena(standardCount * 64 * 1024),

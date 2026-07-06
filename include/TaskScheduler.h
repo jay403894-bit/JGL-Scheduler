@@ -17,7 +17,7 @@
 #include <immintrin.h>
 #include "GlobalFiberPool.h"
 #include "DirectEvent.h"
-namespace JGL {
+namespace JLib {
 	class Thread;
 	class Event;
 

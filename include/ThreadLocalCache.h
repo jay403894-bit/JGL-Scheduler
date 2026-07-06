@@ -3,7 +3,7 @@
 #include "Fiber.h"
 #include "GlobalFiberPool.h"
 
-namespace JGL {
+namespace JLib {
     // Per-worker fiber free-list. Single-threaded: only the owning worker touches it.
     // Pure LIFO stack over localFibers[0..count); no wrapping, no separate head/tail.
     // (The old head/tail+count ring mixed LIFO Push/Pop with a head-based overflow drain;

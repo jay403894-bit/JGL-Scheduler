@@ -9,7 +9,7 @@
 #include "Epochs.h"
 #include "ThreadLocalCache.h"
 #include "GlobalFiberPool.h"
-namespace JGL {
+namespace JLib {
 	class TaskScheduler;
     inline thread_local Task* current_task = nullptr;
     struct WaitHandle {

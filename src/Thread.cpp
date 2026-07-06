@@ -3,7 +3,7 @@
 #include "../include/TaskScheduler.h"
 #include <chrono>
 #include <iostream>
-using namespace JGL;
+using namespace JLib;
 thread_local Thread* Thread::instance = nullptr;
 
 Thread::Thread(TaskScheduler& scheduler) : scheduler(&scheduler) {
@@ -83,12 +83,12 @@ void Thread::Suspend(Fiber* targetFiber){
 	 }
 }
 
- void JGL::Thread::CoYield()
+ void JLib::Thread::CoYield()
  {
 	 GetCurrent()->currentFiber->CoYield();
  }
 
- void JGL::Thread::Suspend()
+ void JLib::Thread::Suspend()
  {
 	 GetCurrent()->currentFiber->Suspend();
  }
@@ -132,11 +132,11 @@ uint32_t Thread::FastRand() {
 	x ^= x << 5;
 	return x;
 }
-Task* JGL::Thread::AcquireWork(bool& isFork)
+Task* JLib::Thread::AcquireWork(bool& isFork)
 {
 	return nullptr;
 }
-void JGL::Thread::RunTask(Task* task, bool isFork)
+void JLib::Thread::RunTask(Task* task, bool isFork)
 {}
 void Thread::Worker() {
 	running.store(true, std::memory_order_release);

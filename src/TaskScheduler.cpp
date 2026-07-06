@@ -4,7 +4,7 @@
 #include "../include/platform.h"
 #include <stdexcept>
 #include <vector>
-using namespace JGL;
+using namespace JLib;
 
 static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
 static_assert(alignof(Task) <= 16, "Task over-aligned for a slot");
@@ -27,7 +27,7 @@ void TaskScheduler::Init(size_t poolSize) {
 	instance = new TaskScheduler(poolSize);
 
 }
-GlobalFiberPool& JGL::TaskScheduler::GetGlobalPool()
+GlobalFiberPool& JLib::TaskScheduler::GetGlobalPool()
 {
 	if (!instance->globalPool)
 		throw std::runtime_error("GlobalFiberPool not initialized!");
@@ -416,7 +416,7 @@ void TaskScheduler::WaitFor(WaitGroup& wg) {
 			std::this_thread::yield();
 	}
 }
-void JGL::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
+void JLib::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
 {
 	// 1. Manually link them locally: Task A -> Task B -> Task C
 	for (size_t i = 0; i < count - 1; ++i) {

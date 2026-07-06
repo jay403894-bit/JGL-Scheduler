@@ -1,5 +1,5 @@
 #include "../include/TaskDAG.h"
-using namespace JGL;
+using namespace JLib;
 
 TaskNode* TaskDAG::CreateNode(Task* t, uint8_t priority, uint8_t cpu_id) {
     // Allocate the node memory from the scheduler's allocator

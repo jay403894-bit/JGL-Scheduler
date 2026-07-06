@@ -1,8 +1,8 @@
 #include "../include/Fiber.h"
 #include "../include/Thread.h"
 #include "../include/TaskScheduler.h"
-using namespace JGL;
-std::atomic<uint64_t> JGL::Fiber::idGenerator{ 0 };
+using namespace JLib;
+std::atomic<uint64_t> JLib::Fiber::idGenerator{ 0 };
 
 // Defined in ContextSwitch.asm. The restore lands on this at a 16-aligned RSP; it
 // 'call's the entry point we stash in RBX, which re-establishes the ABI 8-mod-16 entry.

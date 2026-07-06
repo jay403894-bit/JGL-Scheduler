@@ -2,7 +2,7 @@
 #include <functional>
 #include <atomic>
 
-namespace JGL {
+namespace JLib {
     struct Fiber;
     struct WaitGroup { std::atomic<int> n{ 0 }; };
 
