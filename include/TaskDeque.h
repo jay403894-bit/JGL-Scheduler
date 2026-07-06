@@ -7,7 +7,7 @@
 
 #include "Task.h"
 
-namespace T_Threads {
+namespace JGL {
 
     class alignas(64) TaskDeque {
     public:

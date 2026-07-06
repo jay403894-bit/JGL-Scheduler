@@ -3,7 +3,7 @@
 #include <vector>
 #include <unordered_set>
 #include "TaskScheduler.h"
-namespace T_Threads {
+namespace JGL {
     class Event {
     private:
         std::mutex mtx;

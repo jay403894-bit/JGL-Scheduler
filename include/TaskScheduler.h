@@ -17,12 +17,12 @@
 #include <immintrin.h>
 #include "GlobalFiberPool.h"
 #include "DirectEvent.h"
-namespace T_Threads {
-	class T_Thread;
+namespace JGL {
+	class Thread;
 	class Event;
 
 	class TaskScheduler {
-		friend class T_Thread;
+		friend class Thread;
 		friend class GlobalFiberPool;
 
 
@@ -162,7 +162,7 @@ namespace T_Threads {
 		std::vector<std::vector<int>> clusterMates;
 		// siblingQIndex[qIndex] -- the OTHER worker qIndex sharing this worker's physical core
 		// (SMT sibling), or -1 if none (no SMT, or the sibling logical CPU isn't a pool worker
-		// -- e.g. it's main's). Only stolen from if idle (see T_Thread::busy) -- a busy SMT
+		// -- e.g. it's main's). Only stolen from if idle (see Thread::busy) -- a busy SMT
 		// sibling shares this worker's execution ports, so stealing its work doesn't recruit
 		// any additional throughput, just adds queued work to an already-contended core.
 		std::vector<int> siblingQIndex;
@@ -176,7 +176,7 @@ namespace T_Threads {
 		std::atomic<bool> poolActive{ false };
 		std::atomic<int> nextWorker{ 0 };
 		std::atomic<bool> stopFlag{ false };
-		std::vector<std::shared_ptr<T_Thread>> workers;
+		std::vector<std::shared_ptr<Thread>> workers;
 		TaskMPSCQueue mainQ;
 		std::mutex poolMutex;
 	};

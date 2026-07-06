@@ -6,7 +6,7 @@
 #ifdef _DEBUG
 #include <Windows.h> // OutputDebugStringA/__debugbreak for the free-list canary check below
 #endif
-namespace T_Threads {
+namespace JGL {
     class TaskAllocator {
     public:
         static constexpr size_t SLOT = 256;   // bytes per slot (>= your biggest task)

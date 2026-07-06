@@ -5,7 +5,7 @@
 #include "Fiber.h"
 #include "concurrentqueue.h"
 
-namespace T_Threads {
+namespace JGL {
     // Single-waiter, lock-free rendezvous. One per OUTSTANDING wait, taken from a pool.
     // The signaler holds the pointer directly (handed to it by the arm callback), so there
     // is no name, no map, and no global lock -- unlike the string-keyed Event registry, which

@@ -6,8 +6,8 @@
 #include "Context.h"
 #include "concurrentqueue.h"
 
-namespace T_Threads {
-    class T_Thread;
+namespace JGL {
+    class Thread;
     class GlobalFiberPool {
         mutable std::mutex poolMutex;
         moodycamel::ConcurrentQueue<Fiber*> availableFibers;

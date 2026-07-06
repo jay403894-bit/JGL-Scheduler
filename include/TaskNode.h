@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace T_Threads {
+namespace JGL {
     struct TaskNode {
         TaskAllocator& alloc;                 // injected; the node's list allocates from this
         Task* task;                           // nullptr for a gate (see isGate)

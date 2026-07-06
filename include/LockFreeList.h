@@ -8,16 +8,16 @@
 #include <cstdint>
 #include "Epochs.h"
 #include "TaskAllocator.h"
-#include "T_Thread.h"
+#include "Thread.h"
 #include "Fiber.h"
 
-namespace T_Threads {
+namespace JGL {
 	// Epoch slot for the current execution context: the running fiber's slot if we're on
 	// one, else this (bare) thread's fallback slot. The fiber branch is migration-proof --
 	// the slot travels with the fiber across a context switch. Bare threads (e.g. the main
 	// thread building a DAG) don't migrate, so their per-thread fallback is correct.
 	inline std::atomic<size_t>* CurrentEpochSlot() {
-		if (T_Thread* w = T_Thread::GetCurrent())
+		if (Thread* w = Thread::GetCurrent())
 			if (Fiber* f = w->currentFiber)
 				return &f->localEpoch;
 		return EpochManager::Instance().ThreadSlot(thread_id);

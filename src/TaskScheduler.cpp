@@ -1,10 +1,10 @@
-#include "../include/T_Thread.h"
+#include "../include/Thread.h"
 #include "../include/TaskScheduler.h"
 #include "../include/Event.h"
 #include "../include/platform.h"
 #include <stdexcept>
 #include <vector>
-using namespace T_Threads;
+using namespace JGL;
 
 static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
 static_assert(alignof(Task) <= 16, "Task over-aligned for a slot");
@@ -27,7 +27,7 @@ void TaskScheduler::Init(size_t poolSize) {
 	instance = new TaskScheduler(poolSize);
 
 }
-GlobalFiberPool& T_Threads::TaskScheduler::GetGlobalPool()
+GlobalFiberPool& JGL::TaskScheduler::GetGlobalPool()
 {
 	if (!instance->globalPool)
 		throw std::runtime_error("GlobalFiberPool not initialized!");
@@ -139,8 +139,13 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 			size_t n = loPriInboxes.size();
 			for (int i = 0; i < created; ++i) {
 				loPriInboxes[i % n]->push(taskPtrs[i]);
+				// Targeted, not NotifyAll(): only workers that ACTUALLY received a chunk (up to
+				// n distinct ones, fewer if created < n) need to wake. Blanket-notifying every
+				// worker regardless of whether it got anything was exactly the wasted-wake
+				// pattern this whole redesign is meant to remove -- see hasQueuedWork's comment.
+				workers[i % n]->MarkQueuedWork();
+				workers[i % n]->NotifyWorker();
 			}
-			NotifyAll();
 		}
 
 		// 3. Main computes its own lane while the workers churn -- no wasted thread.
@@ -344,7 +349,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 		hiPriInboxes[i]->init(&taskAllocator);
 	}
 	for (unsigned int i = 0; i < num_workers; ++i) {
-		auto worker = std::make_shared<T_Thread>(*this);
+		auto worker = std::make_shared<Thread>(*this);
 		worker->SetQueueIndex(i);
 		workers.push_back(worker);
 		worker->StartWorker(i + 1);
@@ -358,7 +363,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 }
 
 void TaskScheduler::WaitOnEvent(const std::string& eventName) {
-	auto* thread = T_Thread::GetCurrent();
+	auto* thread = Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
 	if (!myFiber) {
@@ -411,7 +416,7 @@ void TaskScheduler::WaitFor(WaitGroup& wg) {
 			std::this_thread::yield();
 	}
 }
-void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
+void JGL::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
 {
 	// 1. Manually link them locally: Task A -> Task B -> Task C
 	for (size_t i = 0; i < count - 1; ++i) {
@@ -428,7 +433,13 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			chosen = PickNextWorker();
 		}
 		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
-
+		// FIX: this whole function previously never notified ANYONE after the push -- if
+		// `chosen` happened to be genuinely asleep, the entire batch would sit undiscovered
+		// until that worker was woken for some unrelated reason (a different push landing on
+		// it, etc.). A worker's own cv is private; nothing wakes it without an explicit notify
+		// targeting it specifically.
+		workers[chosen]->MarkQueuedWork();
+		workers[chosen]->NotifyWorker();
 	}
 	else
 	{
@@ -438,6 +449,8 @@ void T_Threads::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cp
 			chosen = PickNextWorker();
 		}
 		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
+		workers[chosen]->MarkQueuedWork();
+		workers[chosen]->NotifyWorker();
 	}
 }
 
@@ -450,7 +463,7 @@ bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task) {
 	return Push(cpu_affinity, task);
 }
 void TaskScheduler::WaitOnEventArmed(const std::string& eventName, const std::function<void()>& arm) {
-	auto* thread = T_Thread::GetCurrent();
+	auto* thread = Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
 	if (!myFiber) {
@@ -474,7 +487,7 @@ void TaskScheduler::WaitOnEventArmed(const std::string& eventName, const std::fu
 }
 
 void TaskScheduler::WaitOnEventDirectArmed(const std::function<void(DirectEvent*)>& arm) {
-	auto* thread = T_Thread::GetCurrent();
+	auto* thread = Thread::GetCurrent();
 	Task* myTask = thread->currentRunningTask;
 	Fiber* myFiber = myTask->assignedFiber;
 	if (!myFiber) {
@@ -502,7 +515,7 @@ void TaskScheduler::WaitOnEventDirectArmed(const std::function<void(DirectEvent*
 }
 
 bool TaskScheduler::IsOnFiber() {
-	auto* t = T_Thread::GetCurrent();
+	auto* t = Thread::GetCurrent();
 	// currentRunningTask alone isn't enough -- a fastJob task sets it too (see Worker()'s fast
 	// path) but deliberately never gets a fiber. Callers use this to decide whether
 	// WaitOnEvent*-style suspension is safe, so it must be false for a fastJob task.
@@ -564,7 +577,7 @@ bool TaskScheduler::TryRunStolenFastJob() {
 	for (size_t i = 0; i < n; ++i) {
 		Task* task = batch[i];
 		if (!task->fastJob) {
-			// Requeue does NOT touch pendingTasks, it's only relocating an already-counted task.
+			// Requeue does NOT touch pendingTasks -- it's only relocating an already-counted task.
 			Requeue(task);
 			continue;
 		}
@@ -604,11 +617,14 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 		size_t idx = (size_t)(cpuaffinity - 1);
 		if (!immediateCoresInUse[idx]->load(std::memory_order_acquire)) {
 			loPriInboxes[idx]->push(task);
-			// Use release semantics so a worker that loads pendingTasks in its predicate
-			// sees the increment BEFORE it sees any subsequent notify. This pairs with the
-			// worker's load in its predicate check, closing the notify-loss race.
 			pendingTasks.fetch_add(1, std::memory_order_release);
-			NotifyAll();
+			// Targeted at worker idx specifically, not NotifyAll() -- only that one worker's
+			// inbox actually changed. MarkQueuedWork() (release-ordered, matching
+			// Thread.h's hasQueuedWork comment) pairs with the worker's own acquire-load in its
+			// sleep predicate, closing the same notify-loss race the old blanket approach
+			// happened to also close, just without waking every other worker for nothing.
+			workers[idx]->MarkQueuedWork();
+			workers[idx]->NotifyWorker();
 		}
 		else
 			return false;
@@ -622,8 +638,8 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 			hiPriInboxes[chosen]->push(task);
 		else
 			loPriInboxes[chosen]->push(task);
-		// Use release semantics (see comment above).
 		pendingTasks.fetch_add(1, std::memory_order_release);
+		workers[chosen]->MarkQueuedWork();
 		workers[chosen]->NotifyWorker();
 
 	}
@@ -643,6 +659,7 @@ bool TaskScheduler::Requeue(Task* task) {
 		hiPriInboxes[chosen]->push(task);
 	else
 		loPriInboxes[chosen]->push(task);
+	workers[chosen]->MarkQueuedWork();
 	workers[chosen]->NotifyWorker();
 	return true;
 }
@@ -654,7 +671,7 @@ bool TaskScheduler::PushToCore(size_t core_id, Task* task) {
 	size_t idx = (core_id - 1) % workers.size();
 	if (immediateCoresInUse[idx]->load(std::memory_order_acquire)) return false;
 
-	// Marks this core busy-with-a-fork until T_Thread::Worker() clears it on completion (see
+	// Marks this core busy-with-a-fork until Thread::Worker() clears it on completion (see
 	// the is_handling_fork cleanup in both the fastJob and fiber-DEAD paths). If the forked
 	// task never returns (a long-running subsystem pinned here for the program's lifetime),
 	// this correctly STAYS true forever -- which is what makes PickNextWorker()'s existing
@@ -663,6 +680,10 @@ bool TaskScheduler::PushToCore(size_t core_id, Task* task) {
 	// accepting new round-robin-dispatched work that nothing would ever drain again.
 	immediateCoresInUse[idx]->store(true, std::memory_order_release);
 
+	// Deliberately does NOT call MarkQueuedWork(): a forked/immediate task bypasses the shared
+	// deques/inboxes entirely (goes straight into workers[idx]->immediateTask below) and wakes
+	// ONLY that one targeted worker via SetImmediateTask's own `immediate` flag + notify --
+	// hasQueuedWork is specifically for the deque/inbox case, which this isn't.
 	pendingTasks.fetch_add(1, std::memory_order_relaxed);
 	workers[idx]->SetImmediateTask(task);
 	workers[idx]->NotifyWorker();

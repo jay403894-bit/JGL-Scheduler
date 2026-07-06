@@ -12,7 +12,7 @@
 
 static constexpr uint8_t NONE = 255;
 
-namespace T_Threads {
+namespace JGL {
 
     class TaskDAG {
         struct TaskFinishedContext {

@@ -1,7 +1,7 @@
 #include "../include/GlobalFiberPool.h"
-#include "../include/T_Thread.h"
+#include "../include/Thread.h"
 
-using namespace T_Threads;
+using namespace JGL;
 
 GlobalFiberPool::GlobalFiberPool(size_t standardCount, size_t heavyCount)
 	: standardArena(standardCount * 64 * 1024),
@@ -91,8 +91,8 @@ void GlobalFiberPool::ReturnBatch(Fiber** fibers, size_t count) {
 
 void GlobalFiberPool::FiberEntryWrapper()
 {
-	Fiber* self = T_Thread::GetCurrent()->currentFiber;
-	Task*  task = T_Thread::GetCurrent()->currentRunningTask;
+	Fiber* self = Thread::GetCurrent()->currentFiber;
+	Task*  task = Thread::GetCurrent()->currentRunningTask;
 
 	if (self && task) {
 		task->Execute();
