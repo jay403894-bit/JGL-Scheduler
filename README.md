@@ -1,6 +1,11 @@
-# T_Threads
+# JGL-Scheduler
 
-A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
+Josh's Game Libs Scheduler. A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
+
+-----------
+notice - old docs update coming soon
+-----------
+
 
 ---
 
