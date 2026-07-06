@@ -1,6 +1,6 @@
-# JGL-Scheduler
+# Jlib 
 
-Josh's Game Libs Scheduler. A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
+JLib Scheduler. A high-performance, lightweight C++17 fibers-based task scheduler / job system with thread affinity, and work-stealing queues
 
 -----------
 notice - old docs update coming soon
