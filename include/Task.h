@@ -10,13 +10,17 @@ namespace JLib {
     struct alignas(16) Task {
         using Func = void(*)(void*);
 
+        // Exactly ONE cache line (see the static_assert below): vptr + 5 pointer fields + the
+        // byte flags. Three former members were removed to get here, each with no functionality
+        // loss: stopFlag (had zero readers anywhere -- cooperative cancellation passes a flag
+        // through `data` instead), and onComplete/onCompleteData/callbackFlag (their ONLY user
+        // was TaskDAG, which now wraps fn/data with its own trampoline -- see TaskDAG::Fire).
+        // The vtable pointer stays: Thread.cpp/TaskScheduler.cpp destroy tasks via `t->~Task()`
+        // through the BASE pointer, and that virtual dispatch is what runs ~LambdaTask (and any
+        // captured objects' destructors) -- dropping it would silently leak lambda captures.
         Func fn;
         void* data = nullptr;
         Fiber* assignedFiber = nullptr;
-        std::atomic<uint8_t> stopFlag{ false };
-        Func onComplete = nullptr;
-        void* onCompleteData = nullptr;
-        std::atomic<uint8_t> callbackFlag{ false };
         std::atomic<Task*> next{ nullptr };
         WaitGroup* waitGroup = nullptr;
         uint8_t hiPri = false;
@@ -36,27 +40,12 @@ namespace JLib {
 
         inline void Execute() noexcept {
             fn(data);
-
-            // Use exchange to ensure ONLY ONE thread ever fires onComplete()
-            if (onComplete && !callbackFlag.exchange(true, std::memory_order_acq_rel)) {
-                onComplete(onCompleteData);
-            }
-
             if (waitGroup) waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
         }
-
-        inline void SignalComplete() {
-            // Only fire if we haven't already
-            if (!callbackFlag.exchange(true, std::memory_order_acq_rel)) {
-                if (onComplete) {
-                    onComplete(onCompleteData);
-                }
-            }
-        }
-        inline void Stop() {
-            stopFlag.store(true, std::memory_order_release);
-        }
     };
+    // One cache line, exactly -- if this fires, a new field pushed Task over 64 bytes and every
+    // per-task access just started paying a second line. Grow deliberately or shrink elsewhere.
+    static_assert(sizeof(Task) == 64, "Task must stay exactly one 64-byte cache line");
 
     template<typename F>
     class alignas(16) LambdaTask : public Task {

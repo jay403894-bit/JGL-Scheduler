@@ -552,8 +552,11 @@ void TaskScheduler::Resume() {
 	NotifyAll();
 }
 void TaskScheduler::Stop(Task* worker_task) {
+	// Only the SCHEDULER's own stopFlag matters -- Task::stopFlag was removed (it never had a
+	// single reader; workers only ever check this scheduler-level flag). The parameter is kept
+	// for API compatibility with existing callers.
+	(void)worker_task;
 	stopFlag.store(true, std::memory_order_release);
-	worker_task->Stop();
 }
 
 

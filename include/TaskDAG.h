@@ -18,6 +18,12 @@ namespace JLib {
         struct TaskFinishedContext {
             TaskDAG* parent;
             TaskNode* node;
+            // The node's REAL work, saved before Fire() repoints the task's fn/data at the
+            // trampoline below. This replaced Task::onComplete/onCompleteData outright -- the
+            // DAG was their only user anywhere, and wrapping here shrank every Task to exactly
+            // one 64-byte cache line (see Task.h's static_assert).
+            Task::Func origFn;
+            void* origData;
         };
     public:
         TaskDAG(TaskScheduler& sched) : scheduler(sched) {};
@@ -34,10 +40,14 @@ namespace JLib {
         TaskNode* CreateGate(TaskNode::LogicType type);
          void AddDependency(TaskNode* dependent, TaskNode* dependency);
 
+         // Trampoline installed as the task's fn by Fire(): runs the node's real work, THEN
+         // propagates completion to dependents. Same ordering the old Task::onComplete hook
+         // gave (fn -> completion -> waitGroup decrement, since Execute() decrements after fn
+         // returns), without Task itself carrying callback fields.
          static void OnTaskFinishedWrapper(void* data) {
-             // You have to cast the void* back to whatever struct contains your context
              auto* context = static_cast<TaskFinishedContext*>(data);
-             context->parent->OnTaskFinished(context->node);
+             context->origFn(context->origData);              // the node's actual task
+             context->parent->OnTaskFinished(context->node);  // fire dependents
              delete context; // Cleanup
          }
         // Offline cycle check (Kahn's). MUST be called before any node is submitted --
