@@ -171,11 +171,13 @@ void Thread::Worker() {
 				busy.store(false, std::memory_order_relaxed);
 				currentRunningTask = nullptr;
 
+				bool was_forked = task_to_run->isForked;  // Save before destruction
 				task_to_run->~Task();
 				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 
-				if (is_handling_fork) {
+				// Clear busy flag for both immediate (is_handling_fork) and load-balanced forks (was_forked)
+				if (is_handling_fork || was_forked) {
 					if (qIndex < (int)scheduler->immediateCoresInUse.size()) {
 						scheduler->immediateCoresInUse[qIndex]->store(false, std::memory_order_release);
 					}
@@ -231,12 +233,21 @@ void Thread::Worker() {
 
 			FiberStatus fs = f->status.load(std::memory_order_acquire);
 			if (fs == FiberStatus::DEAD) {
-				// Completed for good 
+				// Completed for good
+				bool was_forked = task_to_run->isForked;  // Save before destruction
 				task_to_run->assignedFiber = nullptr;
 				ReleaseFiber(f);
 				task_to_run->~Task();
 				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
+
+				// Clear busy flag if this was a forked task
+				if (was_forked) {
+					if (qIndex < (int)scheduler->immediateCoresInUse.size()) {
+						scheduler->immediateCoresInUse[qIndex]->store(false, std::memory_order_release);
+					}
+				}
+
 				currentFiber = nullptr;
 				currentRunningTask = nullptr;
 			}
@@ -308,7 +319,7 @@ void Thread::Worker() {
 							scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
 						}
 						else {
-							scheduler->Requeue(t); // non-fastJob: requeue for stealing, can't force-finish here
+							scheduler->Requeue(t);
 						}
 					}
 				};

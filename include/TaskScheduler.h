@@ -53,7 +53,8 @@ namespace JLib {
 		bool Push(uint8_t cpu_affinity, Task* task);
 		bool Requeue(Task* task);
 		void PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity=0);
-		bool PushFork(uint8_t cpu_affinity, Task* task);
+		bool PushImmediate(uint8_t cpu_affinity, Task* task);
+		bool PushFork(Task* task);
 		GlobalFiberPool& GetGlobalPool();
 		Event& GetEvent(const std::string& name);
 		void WaitOnEvent(const std::string& eventName);
@@ -119,9 +120,14 @@ namespace JLib {
 			PushLocal(t, cpu_affinity);
 		}
 		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
-		void PushFork(size_t coreID, F&& f) {
+		void PushImmediate(size_t coreID, F&& f) {
 			auto* t = CreateTask(std::forward<F>(f));
 			PushToCore(coreID, t);
+		}
+		template <class F, std::enable_if_t<!std::is_base_of_v<Task, std::remove_pointer_t<std::decay_t<F>>>, int> = 0>
+		void PushFork(F&& f) {
+			auto* t = CreateTask(std::forward<F>(f));
+			PushFork(t);
 		}
 
 	private:

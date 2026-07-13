@@ -146,7 +146,7 @@ void TaskDAG::Fire(TaskNode* node) {
         scheduler.PushMain(node->task);
     }
     else if (node->isFork) {
-        scheduler.PushFork(node->cpuID, node->task);
+        scheduler.PushImmediate(node->cpuID, node->task);
     }
     else if (node->isLocal) {
         if (node->cpuID == 0)

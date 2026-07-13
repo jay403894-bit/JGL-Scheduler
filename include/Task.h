@@ -1,10 +1,30 @@
 #pragma once
 #include <functional>
 #include <atomic>
-
+#include <mutex>
+#include <unordered_set>
 namespace JLib {
     struct Fiber;
-    struct WaitGroup { std::atomic<int> n{ 0 }; };
+    struct Task;
+    struct WaitGroup {
+        std::atomic<int> n{ 0 };
+        std::mutex mtx;
+        std::unordered_set<Task*> waiters;  // Tasks suspended on this WaitGroup
+        bool hasWaiters = false;
+        void AddWaiter(Task* t) {
+            std::lock_guard<std::mutex> lock(mtx);
+            waiters.insert(t);
+            hasWaiters = true;
+        }
+
+        void RemoveWaiter(Task* t) {
+            std::lock_guard<std::mutex> lock(mtx);
+            waiters.erase(t);
+            if (waiters.empty()) hasWaiters = false;
+        }
+
+        void WakeAll();
+    };
 
     enum class FiberSize : uint8_t { Standard, Heavy };
     struct alignas(16) Task {
@@ -26,13 +46,18 @@ namespace JLib {
         uint8_t hiPri = false;
         FiberSize requiredSize = FiberSize::Standard;
         uint8_t fastJob = 0;
+        uint8_t isForked = 0;  // Set by PushFork, cleared when task completes
 
         Task() : next(nullptr), fn(nullptr), data(nullptr), assignedFiber(nullptr) { ; }
         Task(Func f, void* d = nullptr, uint8_t hipri =false, FiberSize size = FiberSize::Standard)
             : fn(f), data(d), hiPri(hipri), requiredSize(size) {
         }
         virtual ~Task() {
+           if (waitGroup)
+               if(waitGroup->hasWaiters) 
+                   waitGroup->WakeAll();
         }
+
         void* operator new(std::size_t) = delete;
         void* operator new[](std::size_t) = delete;
         void operator delete(void*) = delete;
@@ -40,7 +65,8 @@ namespace JLib {
 
         inline void Execute() noexcept {
             fn(data);
-            if (waitGroup) waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
+            if (waitGroup) 
+                waitGroup->n.fetch_sub(1, std::memory_order_acq_rel);
         }
     };
     // One cache line, exactly -- if this fires, a new field pushed Task over 64 bytes and every

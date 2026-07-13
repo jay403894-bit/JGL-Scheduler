@@ -402,18 +402,17 @@ void TaskScheduler::RunCounted(WaitGroup& wg, Task* t) {
 }
 
 void TaskScheduler::WaitFor(WaitGroup& wg) {
-	// The caller (e.g. the main render thread) is NOT a worker -- it has no fiber, so it must
-	// never run a task that might suspend, and it must free anything it does run itself
-	// correctly (the worker path frees; a bare inline Execute() would leak the slab). Both of
-	// those used to make stealing here unsafe. TryRunStolenFastJob() now handles both: it only
-	// ever executes a stolen fastJob task (by contract, never suspends) and frees it with the
-	// exact same sequence Worker() uses, or hands a non-fastJob task straight back via
-	// Requeue() without running it. GetTask() itself (a plain steal() across every deque) was
-	// always safe for any number of concurrent thieves, worker or not -- that part was never
-	// actually the problem. Only yield when there's nothing to steal, to avoid a hot spin.
-	while (wg.n.load(std::memory_order_acquire) > 0) {
-		if (!TryRunStolenFastJob())
-			std::this_thread::yield();
+	if (IsOnFiber()) {
+		Thread* current = Thread::GetCurrent();
+		Task* task = current->currentRunningTask;
+		wg.AddWaiter(task);
+		Thread::Suspend();  // Park until WakeAll resumes us
+	}
+	else {
+		while (wg.n.load(std::memory_order_acquire) > 0) {
+			if (!TryRunStolenFastJob())
+				std::this_thread::yield();
+		}
 	}
 }
 void JLib::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity)
@@ -458,7 +457,7 @@ bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task) {
 	return PushLocal(task, cpu_affinity);
 }
 
-bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task) {
+bool TaskScheduler::PushImmediate(uint8_t cpu_affinity, Task* task) {
 	if (!task) return false;
 	// MUST be PushToCore, not Push/PushLocal -- PushToCore is the ONLY path that sets
 	// immediateCoresInUse[idx], which is what actually protects the target core from further
@@ -477,6 +476,56 @@ bool TaskScheduler::PushFork(uint8_t cpu_affinity, Task* task) {
 	// SoundManager::Initialize()'s forked mix thread to hang the whole per-frame DAG (main
 	// thread's WaitForMain() blocks forever on a task stranded on the now-unresponsive core).
 	return PushToCore(cpu_affinity, task);
+}
+/*
+bool TaskScheduler::PushFork(Task* task) {
+	if (!task) return false;
+	if (!poolActive) return false;
+
+	// Load-balanced fork-join: spawn to any available worker, not a pinned core.
+	// Used for dynamic fork-join parallelism (recursive tasks, divide-and-conquer).
+	// Mark the target worker as busy (like PushToCore) so it's not assigned new work
+	// while blocked on this fork's WaitFor. PickNextWorker skips cores with this flag set.
+	int worker_id = PickNextWorker();
+	if (worker_id < 0) return false;
+
+	// Mark worker busy so PickNextWorker skips it while it's handling this fork
+	immediateCoresInUse[worker_id]->store(true, std::memory_order_release);
+	task->isForked = 1;  // Flag so Thread clears the core when task completes
+	pendingTasks.fetch_add(1, std::memory_order_relaxed);
+
+	// Push to that worker's deque (not immediate task slot, unlike PushToCore)
+	PushLocal(task, worker_id);
+	return true;
+}*/
+bool TaskScheduler::PushFork(Task* task) {
+	if (!task) return false;
+	if (!poolActive) return false;
+
+	int worker_id;
+	bool is_local_push = false;
+
+	if (IsOnFiber()) {
+		worker_id = Thread::GetCurrent()->qIndex;
+		is_local_push = true;  // Pushing to current worker, skip busy check
+	}
+	else {
+		worker_id = PickNextWorker();
+		if (worker_id < 0) return false;
+	}
+
+	// Only check busy flag if NOT pushing to current worker
+	if (!is_local_push && immediateCoresInUse[worker_id]->load(std::memory_order_acquire))
+		return false;
+
+	if (!is_local_push) {
+		immediateCoresInUse[worker_id]->store(true, std::memory_order_release);
+	}
+
+	task->isForked = 1;
+	pendingTasks.fetch_add(1, std::memory_order_relaxed);
+
+	return PushLocal(task, worker_id);
 }
 void TaskScheduler::WaitOnEventArmed(const std::string& eventName, const std::function<void()>& arm) {
 	auto* thread = Thread::GetCurrent();
