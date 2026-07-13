@@ -3,7 +3,6 @@ add_library(JLib-Scheduler STATIC
     Epochs.cpp
     Fiber.cpp
     GlobalFiberPool.cpp
-    T_Thread.cpp
     Task.cpp
     TaskDAG.cpp
     TaskScheduler.cpp
