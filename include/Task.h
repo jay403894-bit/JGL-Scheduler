@@ -53,9 +53,7 @@ namespace JLib {
             : fn(f), data(d), hiPri(hipri), requiredSize(size) {
         }
         virtual ~Task() {
-           if (waitGroup)
-               if(waitGroup->hasWaiters) 
-                   waitGroup->WakeAll();
+
         }
 
         void* operator new(std::size_t) = delete;

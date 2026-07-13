@@ -168,6 +168,9 @@ void Thread::Worker() {
 				currentRunningTask = task_to_run;
 				busy.store(true, std::memory_order_relaxed);
 				task_to_run->Execute();
+				if (task_to_run->waitGroup)
+					if (task_to_run->waitGroup->hasWaiters)
+						task_to_run->waitGroup->WakeAll();
 				busy.store(false, std::memory_order_relaxed);
 				currentRunningTask = nullptr;
 
@@ -228,6 +231,9 @@ void Thread::Worker() {
 			busy.store(true, std::memory_order_relaxed);
 			{
 				ContextSwitch(&this->schedulerCtx, &f->ctx);
+				if (task_to_run->waitGroup)
+					if (task_to_run->waitGroup->hasWaiters)
+						task_to_run->waitGroup->WakeAll();
 			}
 			busy.store(false, std::memory_order_relaxed);
 
@@ -310,17 +316,7 @@ void Thread::Worker() {
 					for (size_t i = 0; i < count; ++i) {
 						Task* t = batch[i];
 						if (!t) continue;
-						if (t->fastJob) {
-							busy.store(true, std::memory_order_relaxed);
-							t->Execute();
-							busy.store(false, std::memory_order_relaxed);
-							t->~Task();
-							scheduler->GetAllocator()->Free(t);
-							scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
-						}
-						else {
-							scheduler->Requeue(t);
-						}
+						scheduler->Requeue(t);
 					}
 				};
 				drainInbox(scheduler->hiPriInboxes[qIndex].get(), scheduler->hiPri[qIndex].get());

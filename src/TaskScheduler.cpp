@@ -459,45 +459,9 @@ bool TaskScheduler::Push(uint8_t cpu_affinity, Task* task) {
 
 bool TaskScheduler::PushImmediate(uint8_t cpu_affinity, Task* task) {
 	if (!task) return false;
-	// MUST be PushToCore, not Push/PushLocal -- PushToCore is the ONLY path that sets
-	// immediateCoresInUse[idx], which is what actually protects the target core from further
-	// round-robin scheduling (PickNextWorker skips cores with this flag set) and is what makes a
-	// never-returning forked task (e.g. SoundManager's audio mixer, pinned here for the
-	// program's lifetime) correctly starve out new work forever instead of silently stranding
-	// whatever PickNextWorker happens to route there next. Thread::Worker() clears the flag when
-	// a forked task actually COMPLETES (both the fastJob and fiber-DEAD paths), so this also
-	// stays correct for short-lived forked tasks (e.g. TaskDAG's main-affinity nodes) -- busy
-	// only while genuinely in use, whether that's one frame or forever.
-	// Routing through Push (-> PushLocal) instead, as this used to, pushes straight into the
-	// target core's ORDINARY inbox with immediateCoresInUse never set -- PickNextWorker keeps
-	// treating that core as available and keeps assigning it new work, even once its thread is
-	// permanently stuck inside a never-returning fastJob task and can never process anything
-	// again. Any task that landed there was silently lost, which is exactly what caused
-	// SoundManager::Initialize()'s forked mix thread to hang the whole per-frame DAG (main
-	// thread's WaitForMain() blocks forever on a task stranded on the now-unresponsive core).
 	return PushToCore(cpu_affinity, task);
 }
-/*
-bool TaskScheduler::PushFork(Task* task) {
-	if (!task) return false;
-	if (!poolActive) return false;
 
-	// Load-balanced fork-join: spawn to any available worker, not a pinned core.
-	// Used for dynamic fork-join parallelism (recursive tasks, divide-and-conquer).
-	// Mark the target worker as busy (like PushToCore) so it's not assigned new work
-	// while blocked on this fork's WaitFor. PickNextWorker skips cores with this flag set.
-	int worker_id = PickNextWorker();
-	if (worker_id < 0) return false;
-
-	// Mark worker busy so PickNextWorker skips it while it's handling this fork
-	immediateCoresInUse[worker_id]->store(true, std::memory_order_release);
-	task->isForked = 1;  // Flag so Thread clears the core when task completes
-	pendingTasks.fetch_add(1, std::memory_order_relaxed);
-
-	// Push to that worker's deque (not immediate task slot, unlike PushToCore)
-	PushLocal(task, worker_id);
-	return true;
-}*/
 bool TaskScheduler::PushFork(Task* task) {
 	if (!task) return false;
 	if (!poolActive) return false;
