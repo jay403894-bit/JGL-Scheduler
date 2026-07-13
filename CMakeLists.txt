@@ -8,20 +8,6 @@ set(CMAKE_ENABLE_EXPORTS ON)
 add_subdirectory(src)
 
 add_executable(
-  main
-  main.cpp
-)
-
-set_property(TARGET main PROPERTY CXX_STANDARD 20)
-
-target_link_libraries(
-  main
-  PRIVATE
-  JLib-Scheduler
-)
-
-
-add_executable(
   pf_test
   pf_test.cpp
 )
