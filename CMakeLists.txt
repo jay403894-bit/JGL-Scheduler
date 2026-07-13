@@ -7,15 +7,16 @@ set(CMAKE_ENABLE_EXPORTS ON)
 
 add_subdirectory(src)
 
-add_executable(
-  pf_test
-  pf_test.cpp
-)
 
-set_property(TARGET pf_test PROPERTY CXX_STANDARD 20)
+#add_executable(
+#  pf_test
+#  pf_test.cpp
+#)
 
-target_link_libraries(
-  pf_test
-  PRIVATE
-  JLib-Scheduler
-)
+#set_property(TARGET pf_test PROPERTY CXX_STANDARD 20)
+
+#target_link_libraries(
+#  pf_test
+#  PRIVATE
+#  JLib-Scheduler
+#)
