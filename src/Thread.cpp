@@ -177,6 +177,7 @@ void Thread::Worker() {
 				currentRunningTask = nullptr;
 
 				bool was_forked = task_to_run->isForked;  // Save before destruction
+				scheduler->CleanupTaskMetadata(task_to_run);
 				task_to_run->~Task();
 				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);
@@ -249,6 +250,7 @@ void Thread::Worker() {
 				task_to_run->assignedFiber = nullptr;
 				ReleaseFiber(f);
 
+				scheduler->CleanupTaskMetadata(task_to_run);
 				task_to_run->~Task();
 				scheduler->GetAllocator()->Free(task_to_run);
 				scheduler->pendingTasks.fetch_sub(1, std::memory_order_acq_rel);

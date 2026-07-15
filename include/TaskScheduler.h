@@ -27,6 +27,11 @@ namespace JLib {
 
 
 	public:
+		// Priority inheritance methods (public for SchedulerMutex access)
+		Task* GetCurrentTask() const;
+		void BoostTaskPriority(Task* task);
+		void UnboostTaskPriority(Task* task);
+		void CleanupTaskMetadata(Task* task);
 
 		static TaskScheduler& Instance() {
 			if (!instance)
@@ -145,6 +150,20 @@ namespace JLib {
 		static GlobalFiberPool* globalPool;
 		// -----------------------------------------------
 
+		// ---- Starvation prevention (age-based promotion + fairness) ----
+		std::unordered_map<Task*, uint64_t> taskQueuedTime; // task -> time pushed
+		std::mutex taskTimeMutex;
+		static constexpr uint64_t kAgePromotionThresholdMs = 50; // promote loPri if waiting > 50ms
+		int consecutiveHiPriSteals = 0;
+		static constexpr int kStealFairnessWindow = 8; // after 8 hiPri steals, force a loPri scan
+		uint64_t GetCurrentTimeMs() const;
+		// ----
+
+		// ---- Priority inheritance for locks (prevent inversion deadlock) ----
+		std::unordered_map<Task*, uint8_t> taskPriorityBoosts; // task -> original priority (before boost)
+		std::mutex priorityBoostMutex;
+		// ----
+
 
 		void RunCounted(WaitGroup& wg, Task* t);
 		static size_t GetSafeTC();
@@ -185,5 +204,60 @@ namespace JLib {
 		std::vector<std::shared_ptr<Thread>> workers;
 		TaskMPSCQueue mainQ;
 		std::mutex poolMutex;
+	};
+
+	// Priority-inheritance-aware mutex wrapper. When a task tries to lock and blocks, the
+	// lock holder's priority is temporarily boosted to prevent priority inversion deadlock.
+	class SchedulerMutex {
+	private:
+		std::mutex mtx;
+		Task* lockHolder = nullptr;
+		std::mutex holderMutex; // guards lockHolder
+
+	public:
+		SchedulerMutex() = default;
+		~SchedulerMutex() = default;
+
+		// Acquires the lock. If the caller blocks on contention, boosts the lock holder's
+		// priority to prevent priority inversion. Must be called from a fiber (task context).
+		void lock() {
+			Task* callerTask = TaskScheduler::Instance().GetCurrentTask();
+			if (!mtx.try_lock()) {
+				// Contending -- boost the holder if one exists
+				{
+					std::lock_guard<std::mutex> lg(holderMutex);
+					if (lockHolder && lockHolder != callerTask) {
+						TaskScheduler::Instance().BoostTaskPriority(lockHolder);
+					}
+				}
+				mtx.lock(); // now block on the real lock
+			}
+			// Lock acquired -- we're now the holder
+			std::lock_guard<std::mutex> lg(holderMutex);
+			lockHolder = callerTask;
+		}
+
+		void unlock() {
+			Task* wasHolder;
+			{
+				std::lock_guard<std::mutex> lg(holderMutex);
+				wasHolder = lockHolder;
+				lockHolder = nullptr;
+			}
+			if (wasHolder) {
+				TaskScheduler::Instance().UnboostTaskPriority(wasHolder);
+			}
+			mtx.unlock();
+		}
+
+		// Non-blocking try_lock
+		bool try_lock() {
+			if (mtx.try_lock()) {
+				std::lock_guard<std::mutex> lg(holderMutex);
+				lockHolder = TaskScheduler::Instance().GetCurrentTask();
+				return true;
+			}
+			return false;
+		}
 	};
 }

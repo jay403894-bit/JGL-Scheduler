@@ -4,6 +4,7 @@
 #include "../include/platform.h"
 #include <stdexcept>
 #include <vector>
+#include <chrono>
 using namespace JLib;
 
 static_assert(sizeof(Task) <= TaskAllocator::SLOT, "Task doesn't fit a slot");
@@ -591,21 +592,53 @@ void TaskScheduler::Stop(Task* worker_task) {
 // across the batch instead of paying one CAS per stolen task. Caller (there's no per-caller
 // "own deque" assumption here -- this is used by non-workers too, e.g. main) is responsible
 // for what happens to items beyond out[0].
+// NOW INCLUDES: fairness (alternate hiPri/loPri scans) and age-based promotion (boost old loPri tasks).
 size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
-	size_t numThreads = hiPri.size();
+	uint64_t now = GetCurrentTimeMs();
+
+	// Fairness: after kStealFairnessWindow consecutive hiPri steals, force a loPri scan
+	bool forceLoPri = (consecutiveHiPriSteals >= kStealFairnessWindow);
+
+	if (!forceLoPri) {
+		// Normal priority: try hiPri first
+		size_t numThreads = hiPri.size();
+		size_t start = rand() % numThreads;
+		for (size_t i = 0; i < numThreads; ++i) {
+			size_t target = (start + i) % numThreads;
+			size_t n = hiPri[target]->steal_batch(out, maxCount);
+			if (n > 0) {
+				consecutiveHiPriSteals++;
+				return n;
+			}
+		}
+	}
+
+	// Try loPri (either forced or as fallback)
+	consecutiveHiPriSteals = 0; // reset fairness counter when we actually steal from loPri
+	size_t numThreads = loPri.size();
 	size_t start = rand() % numThreads;
 	for (size_t i = 0; i < numThreads; ++i) {
 		size_t target = (start + i) % numThreads;
-		size_t n = hiPri[target]->steal_batch(out, maxCount);
-		if (n > 0) return n;
-	}
-	numThreads = loPri.size();
-	start = rand() % numThreads;
-	for (size_t i = 0; i < numThreads; ++i) {
-		size_t target = (start + i) % numThreads;
 		size_t n = loPri[target]->steal_batch(out, maxCount);
-		if (n > 0) return n;
+		if (n > 0) {
+			// Age-based promotion: if any of these tasks have been waiting too long, promote them
+			{
+				std::lock_guard<std::mutex> lg(taskTimeMutex);
+				for (size_t j = 0; j < n; ++j) {
+					auto it = taskQueuedTime.find(out[j]);
+					if (it != taskQueuedTime.end()) {
+						uint64_t age = now - it->second;
+						if (age > kAgePromotionThresholdMs) {
+							out[j]->hiPri = 1; // promote to high priority
+						}
+						taskQueuedTime.erase(it); // clear timestamp once checked
+					}
+				}
+			}
+			return n;
+		}
 	}
+
 	return 0;
 }
 
@@ -661,6 +694,12 @@ Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, Fib
 
 bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	if (!task) return false;
+
+	// Record queuedTime for age-based promotion
+	if (!task->hiPri) {
+		std::lock_guard<std::mutex> lg(taskTimeMutex);
+		taskQueuedTime[task] = GetCurrentTimeMs();
+	}
 
 	size_t num_workers = workers.size();
 	if (cpuaffinity > 0 && (size_t)(cpuaffinity - 1) < num_workers) {
@@ -751,4 +790,53 @@ int TaskScheduler::PickNextWorker() {
 	int fallback = static_cast<int>(nextWorker);
 	nextWorker = (fallback + 1) % n;
 	return fallback;
+}
+
+// ---- Starvation prevention implementation ----
+uint64_t TaskScheduler::GetCurrentTimeMs() const {
+	using namespace std::chrono;
+	return duration_cast<milliseconds>(high_resolution_clock::now().time_since_epoch()).count();
+}
+
+// ---- Priority inheritance implementation ----
+Task* TaskScheduler::GetCurrentTask() const {
+	// Access the current worker thread via thread-local storage (Thread::GetCurrent() returns
+	// the thread_local Thread::instance if this is a worker thread, nullptr otherwise).
+	// If we're on a worker thread with a running task, return it; otherwise nullptr.
+	Thread* currentThread = Thread::GetCurrent();
+	if (currentThread && currentThread->currentRunningTask) {
+		return currentThread->currentRunningTask;
+	}
+	return nullptr; // Not on a worker thread, or no task currently running
+}
+
+void TaskScheduler::BoostTaskPriority(Task* task) {
+	if (!task) return;
+	std::lock_guard<std::mutex> lg(priorityBoostMutex);
+	// Only boost if not already boosted
+	if (taskPriorityBoosts.find(task) == taskPriorityBoosts.end()) {
+		taskPriorityBoosts[task] = task->hiPri;
+		task->hiPri = 1; // boost to high priority
+	}
+}
+
+void TaskScheduler::UnboostTaskPriority(Task* task) {
+	if (!task) return;
+	std::lock_guard<std::mutex> lg(priorityBoostMutex);
+	auto it = taskPriorityBoosts.find(task);
+	if (it != taskPriorityBoosts.end()) {
+		task->hiPri = it->second; // restore original priority
+		taskPriorityBoosts.erase(it);
+	}
+}
+
+void TaskScheduler::CleanupTaskMetadata(Task* task) {
+	if (!task) return;
+	// Clean up queuedTime
+	{
+		std::lock_guard<std::mutex> lg(taskTimeMutex);
+		taskQueuedTime.erase(task);
+	}
+	// Clean up priority boosts
+	UnboostTaskPriority(task);
 }

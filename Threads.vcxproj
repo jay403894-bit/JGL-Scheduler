@@ -133,6 +133,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="main.cpp" />
     <ClCompile Include="src\Epochs.cpp" />
     <ClCompile Include="src\Fiber.cpp" />
     <ClCompile Include="src\GlobalFiberPool.cpp" />
