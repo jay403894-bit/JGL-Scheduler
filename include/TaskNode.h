@@ -6,9 +6,23 @@
 #include <string>
 
 namespace JLib {
+    class TaskDAG; // owner backpointer only -- no TaskDAG.h include (it includes this header)
+
     struct TaskNode {
         TaskAllocator& alloc;                 // injected; the node's list allocates from this
         Task* task;                           // nullptr for a gate (see isGate)
+
+        // Embedded completion context -- stamped by TaskDAG::Fire() when it repoints the
+        // task's fn/data at OnTaskFinishedWrapper, so the node's REAL work survives the
+        // overwrite. This used to be a separate heap-allocated TaskFinishedContext (a new+
+        // delete per node fire, the DAG runtime's only heap traffic); the node itself always
+        // outlives the trampoline (it's EBR-retired at the END of OnTaskFinished, and the
+        // actual free is deferred past any reader), so the fields live here instead and the
+        // DAG runtime is genuinely zero-allocation. Unused (defaults) on gates -- they never
+        // schedule a task, so Fire() never stamps them.
+        TaskDAG* owner = nullptr;
+        Task::Func origFn = nullptr;
+        void* origData = nullptr;
 
         // How this node decides it's ready, given its direct predecessors:
         //   AND -> fire once ALL predecessors finish (dependencies_left counts down to 0)

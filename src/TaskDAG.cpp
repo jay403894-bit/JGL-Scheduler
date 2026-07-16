@@ -135,12 +135,15 @@ void TaskDAG::Fire(TaskNode* node) {
     }
 
     // Wrap the task's own fn/data with the completion trampoline (see OnTaskFinishedWrapper) --
-    // the originals are saved in the context and invoked first, so behavior is identical to the
+    // the originals are saved INTO THE NODE and invoked first, so behavior is identical to the
     // old Task::onComplete hook this replaced. Works for LambdaTask too: its origData is the
-    // LambdaTask itself, carried through untouched.
-    auto* ctx = new TaskFinishedContext{ this, node, node->task->fn, node->task->data };
+    // LambdaTask itself, carried through untouched. The node doubles as the trampoline's
+    // context (task->data = node) -- no allocation; see TaskNode.h's embedded-context comment.
+    node->owner = this;
+    node->origFn = node->task->fn;
+    node->origData = node->task->data;
     node->task->fn = &OnTaskFinishedWrapper;
-    node->task->data = ctx;
+    node->task->data = node;
 
     if (node->isMain) {
         scheduler.PushMain(node->task);

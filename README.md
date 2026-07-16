@@ -204,7 +204,7 @@ The TaskDAG manages complex, multi-threaded task dependencies. It provides struc
 
 To maximize execution throughput, TaskDAG acts as a zero-allocation database manager during runtime:
 
-**The 64-Byte Cache Target:** Standard task graphs often bloat tasks by attaching completion callback variables. TaskDAG eliminates this bloat entirely. By moving completion hooks into a transient `TaskFinishedContext` heap/slab object, the core `Task` struct is optimized down to exactly 64 bytes. This guarantees that a task payload matches a CPU cache line perfectly, eliminating cache line splitting.
+**The 64-Byte Cache Target:** Standard task graphs often bloat tasks by attaching completion callback variables. TaskDAG eliminates this bloat entirely. Completion hooks live embedded in the `TaskNode` itself (the node doubles as the trampoline's context and always outlives it), so the core `Task` struct is optimized down to exactly 64 bytes and firing a node performs **zero heap allocations** — nodes come from the slab, and nothing else is allocated. This guarantees that a task payload matches a CPU cache line perfectly, eliminating cache line splitting.
 
 **Epoch-Based Reclamation (EBR):** Nodes are not deleted using standard `free()` hooks. When a task completes, the static `NodeDeleter` registers it with an EBR pipeline, cleanly returning its slot back to a dedicated thread-safe slab allocator.
 

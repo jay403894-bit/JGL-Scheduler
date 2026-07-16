@@ -15,16 +15,6 @@ static constexpr uint8_t NONE = 255;
 namespace JLib {
 
     class TaskDAG {
-        struct TaskFinishedContext {
-            TaskDAG* parent;
-            TaskNode* node;
-            // The node's REAL work, saved before Fire() repoints the task's fn/data at the
-            // trampoline below. This replaced Task::onComplete/onCompleteData outright -- the
-            // DAG was their only user anywhere, and wrapping here shrank every Task to exactly
-            // one 64-byte cache line (see Task.h's static_assert).
-            Task::Func origFn;
-            void* origData;
-        };
     public:
         TaskDAG(TaskScheduler& sched) : scheduler(sched) {};
         TaskNode* CreateNode(Task* t, uint8_t priority = NONE, uint8_t cpu_id = NONE);
@@ -44,11 +34,16 @@ namespace JLib {
          // propagates completion to dependents. Same ordering the old Task::onComplete hook
          // gave (fn -> completion -> waitGroup decrement, since Execute() decrements after fn
          // returns), without Task itself carrying callback fields.
+         // `data` IS the TaskNode -- the saved fn/data/owner live embedded in the node (see
+         // TaskNode.h's embedded-context comment; this replaced a heap-allocated per-fire
+         // TaskFinishedContext). Everything is read BEFORE OnTaskFinished runs: that call
+         // retires the node via EBR, and while the free is epoch-deferred, nothing here may
+         // rely on touching the node after handing it to its own completion path.
          static void OnTaskFinishedWrapper(void* data) {
-             auto* context = static_cast<TaskFinishedContext*>(data);
-             context->origFn(context->origData);              // the node's actual task
-             context->parent->OnTaskFinished(context->node);  // fire dependents
-             delete context; // Cleanup
+             auto* node = static_cast<TaskNode*>(data);
+             TaskDAG* owner = node->owner;
+             node->origFn(node->origData);   // the node's actual task
+             owner->OnTaskFinished(node);    // fire dependents (retires node -- last touch)
          }
         // Offline cycle check (Kahn's). MUST be called before any node is submitted --
         // it walks every tracked node, which self-free once running. Returns true if the
