@@ -85,6 +85,7 @@ void GlobalFiberPool::ReturnBatch(Fiber** fibers, size_t count) {
 
 	// Direct enqueueing of the pointer batch
 	for (size_t i = 0; i < count; ++i) {
+		fibers[i]->localEpoch.store(SIZE_MAX, std::memory_order_release);  // Defensive: clear epoch state
 		availableFibers.enqueue(fibers[i]);
 	}
 }
