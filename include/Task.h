@@ -39,6 +39,8 @@ namespace JLib {
         FiberSize requiredSize = FiberSize::Standard;
         uint8_t fastJob = 0;
         uint8_t isForked = 0;  // Set by PushFork, cleared when task completes
+        uint32_t queuedTimeMs = 0;  // Queued timestamp for age-based promotion (no lock needed)
+        uint8_t priorityBoost = 0;  // Original priority before boost (0 = no boost, otherwise original hiPri)
 
         Task() : next(nullptr), fn(nullptr), data(nullptr), assignedFiber(nullptr) { ; }
         Task(Func f, void* d = nullptr, uint8_t hipri =false, FiberSize size = FiberSize::Standard)

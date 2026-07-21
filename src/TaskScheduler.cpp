@@ -69,7 +69,7 @@ void TaskScheduler::ProcessMainThread() {
 void TaskScheduler::WaitForMain(WaitGroup& wg) {
 	while (wg.n.load(std::memory_order_acquire) > 0) {
 		ProcessMainThread();  // drain any ready main-affinity DAG nodes
-		_mm_pause();
+		std::this_thread::yield();
 	}
 }
 void TaskScheduler::Join() {
@@ -169,7 +169,7 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 		// Only yield when there's nothing at all to steal, to avoid a hot spin either way.
 		while (remaining.load(std::memory_order_acquire) > 0) {
 			if (!TryRunStolenFastJob())
-				_mm_pause();
+				std::this_thread::yield();
 		}	
 
 		delete[] taskPtrs;
@@ -367,7 +367,7 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	}
 	for (auto& w : workers) {
 		while (!w->Ready())
-			_mm_pause();
+			std::this_thread::yield();
 	}
 	thread_id = thread_counter.fetch_add(1);
 	poolActive.store(true, std::memory_order_release);
@@ -429,7 +429,7 @@ void TaskScheduler::WaitFor(WaitGroup& wg) {
 	else {
 		while (wg.n.load(std::memory_order_acquire) > 0) {
 			if (!TryRunStolenFastJob())
-				_mm_pause();
+				std::this_thread::yield();
 		}
 	}
 }
@@ -446,7 +446,7 @@ void JLib::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffi
 	{
 		int chosen = PickNextWorker();
 		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
-			_mm_pause();
+			std::this_thread::yield();
 			chosen = PickNextWorker();
 		}
 		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
@@ -462,7 +462,7 @@ void JLib::TaskScheduler::PushBatch(Task* tasks[], size_t count, uint8_t cpuaffi
 	{
 		int chosen = cpuaffinity - 1;
 		while (immediateCoresInUse[chosen]->load(std::memory_order_acquire)) {
-			_mm_pause();
+			std::this_thread::yield();
 			chosen = PickNextWorker();
 		}
 		loPriInboxes[chosen]->push_batch(tasks[0], tasks[count - 1]);
@@ -628,19 +628,15 @@ size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
 		size_t n = loPri[target]->steal_batch(out, maxCount);
 		if (n > 0) {
 			// Age-based promotion: if any of these tasks have been waiting too long, promote them
-			{
-				taskTimeMutex.lock();
-				for (size_t j = 0; j < n; ++j) {
-					auto it = taskQueuedTime.find(out[j]);
-					if (it != taskQueuedTime.end()) {
-						uint64_t age = now - it->second;
-						if (age > kAgePromotionThresholdMs) {
-							out[j]->hiPri = 1; // promote to high priority
-						}
-						taskQueuedTime.erase(it); // clear timestamp once checked
+			// No lock needed: each task's queuedTimeMs is only touched by one thread at a time
+			for (size_t j = 0; j < n; ++j) {
+				if (out[j]->queuedTimeMs > 0) {
+					uint64_t age = now - (uint64_t)out[j]->queuedTimeMs;
+					if (age > kAgePromotionThresholdMs) {
+						out[j]->hiPri = 1; // promote to high priority
 					}
+					out[j]->queuedTimeMs = 0; // clear timestamp once checked
 				}
-				taskTimeMutex.unlock();
 			}
 			return n;
 		}
@@ -688,7 +684,7 @@ TaskAllocator* TaskScheduler::GetAllocator() {
 }
 void TaskScheduler::WaitAll() {
 	while (pendingTasks.load(std::memory_order_acquire) > 0)
-		_mm_pause();
+		std::this_thread::yield();
 }
 
 Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, FiberSize size, uint8_t fastJob) {
@@ -702,11 +698,9 @@ Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, Fib
 bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 	if (!task) return false;
 
-	// Record queuedTime for age-based promotion
+	// Record queuedTime for age-based promotion (no lock needed: only this thread touches this task)
 	if (!task->hiPri) {
-		taskTimeMutex.lock();
-		taskQueuedTime[task] = GetCurrentTimeMs();
-		taskTimeMutex.unlock();
+		task->queuedTimeMs = (uint32_t)GetCurrentTimeMs();
 	}
 
 	size_t num_workers = workers.size();
@@ -821,35 +815,26 @@ Task* TaskScheduler::GetCurrentTask() const {
 void TaskScheduler::BoostTaskPriority(Task* task) {
 	if (!task) return;
 
-	priorityBoostMutex.lock();
-	// Only boost if not already boosted
-	if (taskPriorityBoosts.find(task) == taskPriorityBoosts.end()) {
-		taskPriorityBoosts[task] = task->hiPri;
+	// Only boost if not already boosted (no lock needed: only one thread modifies this task)
+	if (task->priorityBoost == 0) {
+		task->priorityBoost = task->hiPri;
 		task->hiPri = 1; // boost to high priority
 	}
-	priorityBoostMutex.unlock();
 }
 
 void TaskScheduler::UnboostTaskPriority(Task* task) {
 	if (!task) return;
-	priorityBoostMutex.lock();
-	auto it = taskPriorityBoosts.find(task);
-	if (it != taskPriorityBoosts.end()) {
-		task->hiPri = it->second; // restore original priority
-		taskPriorityBoosts.erase(it);
+	// Restore original priority if boosted (no lock needed: only one thread modifies this task)
+	if (task->priorityBoost != 0) {
+		task->hiPri = task->priorityBoost; // restore original priority
+		task->priorityBoost = 0;
 	}
-	priorityBoostMutex.unlock();
 }
 
 void TaskScheduler::CleanupTaskMetadata(Task* task) {
 	if (!task) return;
-	// Clean up queuedTime
-	{
-		taskTimeMutex.lock();
-		taskQueuedTime.erase(task);
-		taskTimeMutex.unlock();
-	}
-	// Clean up priority boosts
+	// Metadata is stored directly on task, no cleanup needed (task is about to be freed anyway)
+	// Just restore priority if it was boosted
 	UnboostTaskPriority(task);
 }
 
