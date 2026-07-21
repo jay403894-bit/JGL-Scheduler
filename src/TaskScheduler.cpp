@@ -610,9 +610,24 @@ size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
 		size_t target = (start + i) % numThreads;
 		size_t n = loPri[target]->steal_batch(out, maxCount);
 		if (n > 0) {
-			// Age-based promotion DISABLED - was causing task loss in ParallelFor
-			// Modifying task->hiPri while task is stolen could race/corrupt state
-			// TODO: Use atomic or separate promotion queue instead
+			// Age-based promotion, RE-ENABLED 2026-07-21 and now provably race-free. The old
+			// "modifying task->hiPri while the task is stolen could race/corrupt" fear was
+			// unfounded: steal_batch has ALREADY CAS-removed out[0..n) from the deque, so this
+			// thread now EXCLUSIVELY owns them -- no other worker or thief can read/write these
+			// tasks until we hand them back. (Its blame for "task loss in ParallelFor" was also
+			// wrong -- that was the pinned-core inbox-stranding deadlock, fixed same day.)
+			// Flipping hiPri here makes any task we DON'T run inline (a non-fastJob leftover
+			// handed back via Requeue, which is hiPri-aware) land in the hiPri lane so it's
+			// scanned first next round instead of starving behind freshly-pushed hiPri work.
+			// uint32 wall-clock diff: queuedTimeMs is a truncated uint32 stamp, so compare in
+			// uint32 too (wraparound-safe for the small ages involved).
+			uint32_t nowMs = (uint32_t)now;
+			for (size_t k = 0; k < n; ++k) {
+				if (!out[k]->hiPri &&
+					(nowMs - out[k]->queuedTimeMs) > kAgePromotionThresholdMs) {
+					out[k]->hiPri = 1;
+				}
+			}
 			return n;
 		}
 	}
