@@ -15,11 +15,81 @@
 #include <unordered_map>
 #include <thread>
 #include <immintrin.h>
+#include <queue>
 #include "GlobalFiberPool.h"
 #include "DirectEvent.h"
 namespace JLib {
 	class Thread;
 	class Event;
+
+	// Priority-inheritance-aware mutex wrapper. When a task tries to lock and blocks, the
+	// lock holder's priority is temporarily boosted to prevent priority inversion deadlock.
+	class SchedulerMutex {
+	private:
+		std::atomic_flag spinLock = ATOMIC_FLAG_INIT;
+		bool locked = false;
+		Task* lockHolder = nullptr;
+		std::queue<Fiber*> waitingFibers; // fibers waiting for the lock
+		std::atomic_flag holderLock = ATOMIC_FLAG_INIT;
+
+	public:
+		SchedulerMutex() = default;
+		~SchedulerMutex() = default;
+
+		// Acquires the lock. If the caller blocks on contention, boosts the lock holder's
+		// priority to prevent priority inversion. Must be called from a fiber (task context).
+		void Lock();
+
+		void Unlock();
+
+		// Non-blocking try_lock
+		bool Try_Lock();
+	};
+
+	class SchedulerSemaphore {
+	private:
+		std::mutex mtx;
+		std::queue<Fiber*> waitingFibers;  // suspended fibers waiting for a permit
+		std::atomic_flag spinLock = ATOMIC_FLAG_INIT; // Must be here!
+		int permits;
+		const int maxPermits;
+
+	public:
+
+		explicit SchedulerSemaphore(int initialPermits, int maxPermits = INT_MAX)
+			: permits(initialPermits), maxPermits(maxPermits) {}
+
+		void Wait();
+
+		bool Try_Wait();
+
+		void Signal();
+	};
+
+	class SchedulerConditionVariable {
+	private:
+		// User-space spinlock protecting the internal CV queue
+		std::atomic_flag spinLock = ATOMIC_FLAG_INIT;
+
+		// A queue of semaphores, each representing a waiting fiber context
+		std::queue<SchedulerSemaphore*> waitingQueue;
+
+		void LockQueue();
+		void UnlockQueue();
+
+	public:
+		SchedulerConditionVariable() = default;
+		~SchedulerConditionVariable() = default;
+
+		// Fibers suspend here; FastJobs spin/steal work
+		void Wait(SchedulerMutex& mutex);
+
+		// Unblocks one waiting fiber context
+		void Notify_One();
+
+		// Unblocks all waiting fiber contexts
+		void Notify_All();
+	};
 
 	class TaskScheduler {
 		friend class Thread;
@@ -60,6 +130,9 @@ namespace JLib {
 		void PushBatch(Task* tasks[], size_t count, uint8_t cpuaffinity=0);
 		bool PushImmediate(uint8_t cpu_affinity, Task* task);
 		bool PushFork(Task* task);
+		static bool IsInitialized() {
+			return instance != nullptr;
+		}
 		GlobalFiberPool& GetGlobalPool();
 		Event& GetEvent(const std::string& name);
 		void WaitOnEvent(const std::string& eventName);
@@ -206,58 +279,4 @@ namespace JLib {
 		std::mutex poolMutex;
 	};
 
-	// Priority-inheritance-aware mutex wrapper. When a task tries to lock and blocks, the
-	// lock holder's priority is temporarily boosted to prevent priority inversion deadlock.
-	class SchedulerMutex {
-	private:
-		std::mutex mtx;
-		Task* lockHolder = nullptr;
-		std::mutex holderMutex; // guards lockHolder
-
-	public:
-		SchedulerMutex() = default;
-		~SchedulerMutex() = default;
-
-		// Acquires the lock. If the caller blocks on contention, boosts the lock holder's
-		// priority to prevent priority inversion. Must be called from a fiber (task context).
-		void lock() {
-			Task* callerTask = TaskScheduler::Instance().GetCurrentTask();
-			if (!mtx.try_lock()) {
-				// Contending -- boost the holder if one exists
-				{
-					std::lock_guard<std::mutex> lg(holderMutex);
-					if (lockHolder && lockHolder != callerTask) {
-						TaskScheduler::Instance().BoostTaskPriority(lockHolder);
-					}
-				}
-				mtx.lock(); // now block on the real lock
-			}
-			// Lock acquired -- we're now the holder
-			std::lock_guard<std::mutex> lg(holderMutex);
-			lockHolder = callerTask;
-		}
-
-		void unlock() {
-			Task* wasHolder;
-			{
-				std::lock_guard<std::mutex> lg(holderMutex);
-				wasHolder = lockHolder;
-				lockHolder = nullptr;
-			}
-			if (wasHolder) {
-				TaskScheduler::Instance().UnboostTaskPriority(wasHolder);
-			}
-			mtx.unlock();
-		}
-
-		// Non-blocking try_lock
-		bool try_lock() {
-			if (mtx.try_lock()) {
-				std::lock_guard<std::mutex> lg(holderMutex);
-				lockHolder = TaskScheduler::Instance().GetCurrentTask();
-				return true;
-			}
-			return false;
-		}
-	};
 }

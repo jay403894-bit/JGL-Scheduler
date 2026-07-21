@@ -3,6 +3,16 @@
 Correctness fixes are marked **[CRITICAL]** with a note on what breaks without them —
 downstream users (forks/ports) should treat those as must-pull.
 
+## 2026-07-20
+- **Fiber-aware synchronization toolkit** (SchedulerMutex, SchedulerSemaphore,
+  SchedulerConditionVariable): three complementary primitives built on spinlocks and
+  fiber suspend/resume. Core design: fibers suspend on contention (yielding thread to
+  other work), fast jobs spin-wait with `TryRunStolenFastJob()` to remain productive
+  during lock acquisition. SchedulerMutex adds priority inheritance (boosts held-lock
+  owner, prevents inversion). SchedulerConditionVariable uses transient semaphores for
+  zero-allocation waiter coordination. All three tested end-to-end; scheduler internals
+  remain on std::mutex (low-contention admin locks, simpler init/shutdown).
+
 ## 2026-07-17
 - **Fiber stack guard pages** (`FiberStackArena::AllocateStack`): the lowest 4KB page of
   every fiber stack is now `PAGE_NOACCESS`. Stacks are carved contiguously from one

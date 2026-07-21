@@ -69,7 +69,7 @@ void TaskScheduler::ProcessMainThread() {
 void TaskScheduler::WaitForMain(WaitGroup& wg) {
 	while (wg.n.load(std::memory_order_acquire) > 0) {
 		ProcessMainThread();  // drain any ready main-affinity DAG nodes
-		std::this_thread::yield();
+		_mm_pause();
 	}
 }
 void TaskScheduler::Join() {
@@ -78,9 +78,11 @@ void TaskScheduler::Join() {
 	stopFlag.store(true, std::memory_order_release);
 
 	{
-		std::lock_guard<std::mutex> lock(registryMtx);
+		registryMtx.lock();
 		for (auto& pair : eventRegistry)
 			pair.second->SignalAll();
+
+		registryMtx.unlock();
 	}
 	NotifyAll();
 
@@ -88,10 +90,11 @@ void TaskScheduler::Join() {
 		worker->Join();
 
 	{
-		std::lock_guard<std::mutex> lock(poolMutex);
+		poolMutex.lock();
 		workers.clear();
 		mainQ.clear();
 		immediateCoresInUse.clear();
+		poolMutex.unlock();
 	}
 
 	poolActive.store(false, std::memory_order_release);
@@ -166,8 +169,8 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 		// Only yield when there's nothing at all to steal, to avoid a hot spin either way.
 		while (remaining.load(std::memory_order_acquire) > 0) {
 			if (!TryRunStolenFastJob())
-				std::this_thread::yield();
-		}
+				_mm_pause();
+		}	
 
 		delete[] taskPtrs;
 	}
@@ -301,7 +304,7 @@ void TaskScheduler::BuildTopology(unsigned int num_workers) {
 }
 
 void TaskScheduler::StartPool(size_t poolSize) {
-	std::lock_guard<std::mutex> lock(poolMutex);
+	poolMutex.lock();
 	thread_counter.store(0, std::memory_order_release);
 	if (poolSize == 0)
 		poolSize = GetSafeTC();
@@ -364,10 +367,11 @@ void TaskScheduler::StartPool(size_t poolSize) {
 	}
 	for (auto& w : workers) {
 		while (!w->Ready())
-			std::this_thread::yield();
+			_mm_pause();
 	}
 	thread_id = thread_counter.fetch_add(1);
 	poolActive.store(true, std::memory_order_release);
+	poolMutex.unlock();
 }
 
 void TaskScheduler::WaitOnEvent(const std::string& eventName) {
@@ -425,7 +429,7 @@ void TaskScheduler::WaitFor(WaitGroup& wg) {
 	else {
 		while (wg.n.load(std::memory_order_acquire) > 0) {
 			if (!TryRunStolenFastJob())
-				std::this_thread::yield();
+				_mm_pause();
 		}
 	}
 }
@@ -566,10 +570,12 @@ bool TaskScheduler::IsOnFiber() {
 }
 
 Event& TaskScheduler::GetEvent(const std::string& name) {
-	std::lock_guard<std::mutex> lock(registryMtx);
+	registryMtx.lock();
 	if (eventRegistry.find(name) == eventRegistry.end())
 		eventRegistry[name] = std::make_unique<Event>();
-	return *eventRegistry[name];
+	Event& event = *eventRegistry[name];
+	registryMtx.unlock();
+	return event;
 }
 void TaskScheduler::Pause() {
 	paused.store(true, std::memory_order_release);
@@ -623,7 +629,7 @@ size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
 		if (n > 0) {
 			// Age-based promotion: if any of these tasks have been waiting too long, promote them
 			{
-				std::lock_guard<std::mutex> lg(taskTimeMutex);
+				taskTimeMutex.lock();
 				for (size_t j = 0; j < n; ++j) {
 					auto it = taskQueuedTime.find(out[j]);
 					if (it != taskQueuedTime.end()) {
@@ -634,6 +640,7 @@ size_t TaskScheduler::GetTaskBatch(Task** out, size_t maxCount) {
 						taskQueuedTime.erase(it); // clear timestamp once checked
 					}
 				}
+				taskTimeMutex.unlock();
 			}
 			return n;
 		}
@@ -681,7 +688,7 @@ TaskAllocator* TaskScheduler::GetAllocator() {
 }
 void TaskScheduler::WaitAll() {
 	while (pendingTasks.load(std::memory_order_acquire) > 0)
-		std::this_thread::yield();
+		_mm_pause();
 }
 
 Task* TaskScheduler::CreateTask(void(*fn)(void*), void* data, uint8_t hipri, FiberSize size, uint8_t fastJob) {
@@ -697,8 +704,9 @@ bool TaskScheduler::PushLocal(Task* task, uint8_t cpuaffinity) {
 
 	// Record queuedTime for age-based promotion
 	if (!task->hiPri) {
-		std::lock_guard<std::mutex> lg(taskTimeMutex);
+		taskTimeMutex.lock();
 		taskQueuedTime[task] = GetCurrentTimeMs();
+		taskTimeMutex.unlock();
 	}
 
 	size_t num_workers = workers.size();
@@ -812,31 +820,279 @@ Task* TaskScheduler::GetCurrentTask() const {
 
 void TaskScheduler::BoostTaskPriority(Task* task) {
 	if (!task) return;
-	std::lock_guard<std::mutex> lg(priorityBoostMutex);
+
+	priorityBoostMutex.lock();
 	// Only boost if not already boosted
 	if (taskPriorityBoosts.find(task) == taskPriorityBoosts.end()) {
 		taskPriorityBoosts[task] = task->hiPri;
 		task->hiPri = 1; // boost to high priority
 	}
+	priorityBoostMutex.unlock();
 }
 
 void TaskScheduler::UnboostTaskPriority(Task* task) {
 	if (!task) return;
-	std::lock_guard<std::mutex> lg(priorityBoostMutex);
+	priorityBoostMutex.lock();
 	auto it = taskPriorityBoosts.find(task);
 	if (it != taskPriorityBoosts.end()) {
 		task->hiPri = it->second; // restore original priority
 		taskPriorityBoosts.erase(it);
 	}
+	priorityBoostMutex.unlock();
 }
 
 void TaskScheduler::CleanupTaskMetadata(Task* task) {
 	if (!task) return;
 	// Clean up queuedTime
 	{
-		std::lock_guard<std::mutex> lg(taskTimeMutex);
+		taskTimeMutex.lock();
 		taskQueuedTime.erase(task);
+		taskTimeMutex.unlock();
 	}
 	// Clean up priority boosts
 	UnboostTaskPriority(task);
+}
+
+void SchedulerMutex::Lock() {
+	auto thread = Thread::GetCurrent();
+	Fiber* current = (thread != nullptr) ? thread->currentFiber : nullptr;
+
+	if (current != nullptr) {
+		// Fiber context: suspend on contention instead of blocking thread
+		Task* callerTask = (TaskScheduler::IsInitialized()) ? TaskScheduler::Instance().GetCurrentTask() : nullptr;
+		{
+			while (spinLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+			if (!locked) {
+				locked = true;
+				spinLock.clear(std::memory_order_release);
+				{
+					while (holderLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+					lockHolder = callerTask;
+					holderLock.clear(std::memory_order_release);
+				}
+				return;
+			}
+			waitingFibers.push(current);
+			spinLock.clear(std::memory_order_release);
+		}
+		Thread::Suspend(current);
+		// Resumed: we have the lock
+		{
+			while (holderLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+			lockHolder = callerTask;
+			holderLock.clear(std::memory_order_release);
+		}
+	}
+	else {
+		// Fast job: try to run stolen work while spinning on lock
+		while (!Try_Lock()) {
+			if (TaskScheduler::IsInitialized()) {
+				if (!TaskScheduler::Instance().TryRunStolenFastJob()) {
+					_mm_pause();
+				}
+			}
+			else {
+				_mm_pause();
+			}
+		}
+	}
+}
+
+void SchedulerMutex::Unlock()
+{
+	Task* wasHolder;
+	Fiber* nextFiber = nullptr;
+	{
+		while (holderLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+		wasHolder = lockHolder;
+		lockHolder = nullptr;
+		holderLock.clear(std::memory_order_release);
+	}
+
+	{
+		while (spinLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+		if (!waitingFibers.empty()) {
+			nextFiber = waitingFibers.front();
+			waitingFibers.pop();
+		}
+		else {
+			locked = false;
+		}
+		spinLock.clear(std::memory_order_release);
+	}
+
+	// Only unboos if scheduler is initialized AND it's not a recursive/shutdown path
+	if (wasHolder && TaskScheduler::IsInitialized()) {
+		TaskScheduler::Instance().UnboostTaskPriority(wasHolder);
+	}
+
+	if (nextFiber) {
+		Thread::Resume(nextFiber);
+	}
+}
+
+bool SchedulerMutex::Try_Lock()
+{
+	while (spinLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+	if (!locked) {
+		locked = true;
+		spinLock.clear(std::memory_order_release);
+		{
+			while (holderLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+			Task* callerTask = TaskScheduler::IsInitialized() ? TaskScheduler::Instance().GetCurrentTask() : nullptr;
+			lockHolder = callerTask;
+			holderLock.clear(std::memory_order_release);
+		}
+		return true;
+	}
+	spinLock.clear(std::memory_order_release);
+	return false;
+}
+
+void SchedulerSemaphore::Wait() {
+	auto thread = Thread::GetCurrent();
+	Fiber* current = (thread != nullptr) ? thread->currentFiber : nullptr;
+	if (current != nullptr) {
+		{
+			// Tight spin-lock to protect inner state variables in user-space
+			while (spinLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+
+			if (permits > 0) {
+				--permits;
+				spinLock.clear(std::memory_order_release);
+				return;
+			}
+			waitingFibers.push(current);
+			spinLock.clear(std::memory_order_release);
+		}
+		Thread::Suspend(current);
+	}
+	else {
+		// Fast job: continuous loop until permit is successfully acquired
+		while (!Try_Wait()) {
+			if (TaskScheduler::IsInitialized()) {
+				if (!TaskScheduler::Instance().TryRunStolenFastJob()) {
+					_mm_pause();
+				}
+			}
+			else
+				_mm_pause();
+		}
+	}
+}
+
+bool SchedulerSemaphore::Try_Wait() {
+	while (spinLock.test_and_set(std::memory_order_acquire)) { _mm_pause(); }
+	if (permits > 0) {
+		--permits;
+		spinLock.clear(std::memory_order_release);
+		return true;
+	}
+	spinLock.clear(std::memory_order_release);
+	return false;
+}
+
+void SchedulerSemaphore::Signal()
+{
+	// 1. Acquire the user-space spinlock
+	while (spinLock.test_and_set(std::memory_order_acquire)) {
+		_mm_pause();
+	}
+
+	// 2. Safely manipulate the queue and permits
+	if (!waitingFibers.empty()) {
+		Fiber* fiber = waitingFibers.front();
+		waitingFibers.pop();
+
+		// 3. Release lock BEFORE resuming the fiber to minimize contention overhead
+		spinLock.clear(std::memory_order_release);
+
+		Thread::Resume(fiber);
+	}
+	else {
+		if (permits < maxPermits) {
+			++permits;  // no one waiting, just increment
+		}
+		// 3. Release lock on this execution path
+		spinLock.clear(std::memory_order_release);
+	}
+}
+
+void SchedulerConditionVariable::LockQueue() {
+	while (spinLock.test_and_set(std::memory_order_acquire)) {
+		_mm_pause();
+	}
+}
+
+void SchedulerConditionVariable::UnlockQueue() {
+	spinLock.clear(std::memory_order_release);
+}
+
+void SchedulerConditionVariable::Wait(SchedulerMutex& mutex) {
+	auto thread = Thread::GetCurrent();
+	Fiber* current = (thread != nullptr) ? thread->currentFiber : nullptr;
+
+	if (current != nullptr) {
+		// 1. Create a transient, local semaphore initialized to 0 permits
+		SchedulerSemaphore localWaitSemaphore(0, 1);
+
+		// 2. Lock the CV internal queue and push our wait handle
+		LockQueue();
+		waitingQueue.push(&localWaitSemaphore);
+		UnlockQueue();
+
+		// 3. Release the outer engine mutex so other threads/fibers can work
+		mutex.Unlock();
+
+		// 4. Suspend the fiber by waiting on our local semaphore.
+		// Your existing semaphore code handles fiber suspension seamlessly here!
+		localWaitSemaphore.Wait();
+
+		// 5. Re-acquire the outer engine lock before returning control to the task
+		mutex.Lock();
+	}
+	else {
+		// Fast Job fallback
+		mutex.Unlock();
+		if (TaskScheduler::IsInitialized()) {
+			if (!TaskScheduler::Instance().TryRunStolenFastJob())
+				_mm_pause();
+		}
+		else {
+			_mm_pause();
+		}
+		mutex.Lock();
+	}
+}
+
+void SchedulerConditionVariable::Notify_One() {
+	SchedulerSemaphore* nextSemaphore = nullptr;
+
+	LockQueue();
+	if (!waitingQueue.empty()) {
+		nextSemaphore = waitingQueue.front();
+		waitingQueue.pop();
+	}
+	UnlockQueue();
+
+	// Signal the semaphore out-of-lock to maximize throughput
+	if (nextSemaphore) {
+		nextSemaphore->Signal();
+	}
+}
+
+void SchedulerConditionVariable::Notify_All() {
+	std::queue<SchedulerSemaphore*> localQueue;
+
+	// Flush the global wait list into a local thread-isolated stack instantly
+	LockQueue();
+	std::swap(waitingQueue, localQueue);
+	UnlockQueue();
+
+	// Signal all waiting contexts sequentially
+	while (!localQueue.empty()) {
+		SchedulerSemaphore* sem = localQueue.front();
+		localQueue.pop();
+		sem->Signal();
+	}
 }
