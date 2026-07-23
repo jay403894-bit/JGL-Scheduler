@@ -53,6 +53,11 @@ namespace JLib {
 		void Join();
 		void NotifyAll();
 		void ParallelFor(int start, int end, int chunkSize, std::function<void(int, int)> func);
+		// Fork-join (recursive-split) variant of ParallelFor -- experimental, benchmarked against the
+		// flat one. Splits the range in half, spawns the right half as a task, recurses on the left
+		// inline; `grain` is the base-case size. Parallelizes task CREATION (the tree is built by many
+		// workers) instead of the caller spawning every chunk serially.
+		void ParallelForFJ(int start, int end, int grain, std::function<void(int, int)> func);
 		void ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func);
 		bool Push(Task* task);
 		void WaitFor(WaitGroup& wg);

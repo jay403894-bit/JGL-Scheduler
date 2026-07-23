@@ -104,18 +104,50 @@ namespace JLib {
         size_t Capacity() const { return mem.size(); }
 
     private:
-        void refill(Cache& c) {                // move up to BATCH from shared -> local
-            std::lock_guard<std::mutex> lk(mtx);
-            for (size_t i = 0; i < BATCH && sharedHead; ++i) {
-                void* s = sharedHead; sharedHead = next(s);
-                next(s) = c.head;   c.head = s;   c.count++;
+        // Move up to BATCH slots shared -> local by SPLICING a sub-chain instead of relinking
+        // node-by-node. The walk MUST stay under the lock (sharedHead is shared, other threads
+        // mutate it), so refill's critical section is still O(BATCH) pointer-CHASES -- but the
+        // per-node WRITES are gone: we detach the whole sub-chain in one store (sharedHead = curr)
+        // and do the local attach (2 writes) after the lock drops. Free-list order is irrelevant
+        // (slots are interchangeable), so keeping the sub-chain's original order is fine.
+        void refill(Cache& c) {
+            void* batchHead;
+            void* batchTail = nullptr;
+            size_t moved = 0;
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                batchHead = sharedHead;
+                if (!batchHead) return;             // pool exhausted
+                void* curr = batchHead;
+                while (curr && moved < BATCH) {
+                    batchTail = curr;
+                    curr = next(curr);
+                    ++moved;
+                }
+                sharedHead = curr;                  // detach [batchHead .. batchTail] in ONE store
             }
+            // Thread-local from here -- batchTail's chain is ours alone now.
+            next(batchTail) = c.head;
+            c.head = batchHead;
+            c.count += moved;
         }
-        void flush(Cache& c) {                 // move excess from local -> shared
-            std::lock_guard<std::mutex> lk(mtx);
-            while (c.count > BATCH) {
-                void* s = c.head; c.head = next(s); c.count--;
-                next(s) = sharedHead; sharedHead = s;
+
+        // Move the excess (down to BATCH) local -> shared. This one is the big win: the walk is over
+        // the THREAD-LOCAL cache, which needs no lock, so we peel the excess sub-chain off entirely
+        // outside the lock and the critical section collapses to just the 2-write splice.
+        void flush(Cache& c) {
+            if (c.count <= BATCH) return;
+            size_t toMove = c.count - BATCH;
+            void* batchHead = c.head;               // peel the top `toMove` nodes (all thread-local)
+            void* batchTail = batchHead;
+            for (size_t i = 1; i < toMove; ++i)
+                batchTail = next(batchTail);
+            c.head = next(batchTail);               // local cache keeps the remaining BATCH nodes
+            c.count = BATCH;
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                next(batchTail) = sharedHead;       // splice the whole sub-chain onto shared in
+                sharedHead = batchHead;             // two writes -- the entire critical section
             }
         }
     };

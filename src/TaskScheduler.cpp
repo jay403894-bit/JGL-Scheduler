@@ -110,6 +110,18 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 	if (totalItems > 10000) {
 		int numTasks = (totalItems + chunkSize - 1) / chunkSize;
 
+		// HYBRID dispatch (same spirit as the scheduler's other hybrids -- fastJob-vs-fiber,
+		// main-spin-help, locality-then-random steal): the FLAT path below has the CALLER spawn every
+		// chunk serially -- fine and ~14% faster when there are few tasks, but its O(#tasks) serial
+		// CreateTask+Push+NotifyWorker on ONE thread blows up at fine grain (benchmarked ~8x slower at
+		// ~15k tasks; each notify also takes the worker mutex from the lost-wakeup fix). Fork-join
+		// distributes the spawn across the whole pool and wins decisively past a few dozen tasks. Cross
+		// over at ~2 tasks/worker (below that flat wins/ties; above, FJ pulls ahead). See ParallelForFJ.
+		if ((size_t)numTasks > 2 * workers.size()) {
+			ParallelForFJ(start, end, chunkSize, func);
+			return;
+		}
+
 		// Chunk 0 is MAIN'S OWN LANE: the calling thread computes it as a plain inline call
 		// (NOT a scheduled task), so it can never suspend/resume and never touches a fiber or
 		// task slab. Chunks 1..numTasks-1 go to workers. This keeps all hw lanes busy without
@@ -158,12 +170,44 @@ void TaskScheduler::ParallelFor(int start, int end, int chunkSize, std::function
 	}
 	else
 	{
-		for (int i = start; i < end; i++)
-		{
-			func(i, i + 1);
-		}
+		// Too small to parallelize -- dispatch overhead would dominate. One whole-range call is
+		// equivalent to the old per-item func(i, i+1) loop for a range-processing func, and cheaper.
+		func(start, end);
 	}
 }
+void TaskScheduler::ParallelForFJ(int start, int end, int grain, std::function<void(int, int)> func) {
+	grain = std::max(1, grain);
+	if (end - start <= 0) return;
+	if (end - start <= grain) { func(start, end); return; }   // too small to bother splitting
+
+	WaitGroup wg;
+	// Recursive splitter. Runs on the CALLER inline (it does the leftmost spine of leaves) and on
+	// WORKERS (each spawned task runs it on its own sub-range). Discipline: spawn the RIGHT half as
+	// a task and continue on the LEFT inline. Each spawned task increments wg once (before Push) and
+	// is decremented once when it completes -- by the worker's waitGroup path (Thread::Worker /
+	// TryRunStolenFastJob), NOT here. The caller's own inline work is not a task and never touches wg.
+	// wg can't hit 0 prematurely: a task increments for all its children (inside rec) BEFORE it
+	// returns (and gets decremented), so pending descendants are always counted.
+	std::function<void(int, int)> rec = [&](int a, int b) {
+		while (b - a > grain) {
+			int mid = a + (b - a) / 2;
+			Task* t = CreateTask([&rec, mid, b]() { rec(mid, b); });
+			if (!t) {
+				func(mid, b);          // arena exhausted: do the right half inline, no task/no wg
+			} else {
+				t->waitGroup = &wg;
+				wg.n.fetch_add(1, std::memory_order_relaxed);   // count BEFORE it can run+decrement
+				Push(t);
+			}
+			b = mid;                   // keep splitting the left half on THIS thread
+		}
+		func(a, b);                    // base case: do the leaf
+	};
+
+	rec(start, end);   // caller does the leftmost spine + spawns the rest of the tree
+	WaitFor(wg);
+}
+
 void TaskScheduler::ParallelForNB(int start, int end, int chunkSize, std::function<void(int, int)> func) {
 	chunkSize = std::max(1, chunkSize);
 	int totalItems = end - start;
